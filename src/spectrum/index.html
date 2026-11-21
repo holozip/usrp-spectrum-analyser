@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B210 Spectrum</title>
+<style>
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101519; color: #ecf4f3; }
+body { margin: 0; }
+main { max-width: 1320px; margin: auto; padding: clamp(16px, 4vw, 56px); }
+header, .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: -.045em; }
+p { color: #a7babd; margin: 5px 0 0; }
+button { font: inherit; color: inherit; background: #243136; border: 1px solid #53676b; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
+section { margin-top: 24px; border: 1px solid #35454a; border-radius: 14px; background: #171f23; overflow: hidden; }
+.bar { padding: 14px 18px; border-bottom: 1px solid #35454a; font-size: .92rem; }
+#state { color: #79e4ce; font-weight: 600; }
+canvas { display: block; width: 100%; height: clamp(300px, 57vh, 650px); }
+progress { display: block; width: 100%; height: 5px; border: 0; accent-color: #66dec5; }
+progress::-webkit-progress-bar { background: #26363b; }
+progress::-webkit-progress-value { background: #66dec5; }
+footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
+</style>
+<main>
+  <header>
+    <div><h1>B210 Spectrum</h1><p>70 MHz – 6 GHz</p></div>
+    <button id="freeze" type="button" aria-pressed="false">Freeze trace</button>
+  </header>
+  <section aria-label="Spectrum plot">
+    <div class="bar"><span id="state" role="status">Connecting</span><span id="reading">Power · dBFS</span></div>
+    <progress id="progress" max="1" value="0" aria-label="Current sweep progress"></progress>
+    <canvas id="plot" role="img" aria-label="Received power in dBFS across 70 MHz to 6 GHz"></canvas>
+  </section>
+  <footer id="detail">Each trace combines sequential receiver captures.</footer>
+</main>
+<script>
+const plot = document.querySelector('#plot');
+const ctx = plot.getContext('2d');
+const state = document.querySelector('#state');
+const progress = document.querySelector('#progress');
+const reading = document.querySelector('#reading');
+const detail = document.querySelector('#detail');
+const freeze = document.querySelector('#freeze');
+let latest, shown, frozen = false, cursor = null;
+const frequencyLabel = hz => hz >= 1e9 ? (hz / 1e9).toFixed(3) + ' GHz' : (hz / 1e6).toFixed(1) + ' MHz';
+
+function draw() {
+  const {width, height} = plot.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  plot.width = Math.round(width * scale);
+  plot.height = Math.round(height * scale);
+  ctx.scale(scale, scale);
+  const left = 58, right = width - 20, top = 24, bottom = height - 34;
+  const low = shown?.low ?? 70e6, high = shown?.high ?? 6e9;
+  const values = shown?.trace ?? [];
+  const x = fraction => left + fraction * (right - left);
+  const y = power => bottom - (power + 120) / 120 * (bottom - top);
+  function line(x1, y1, x2, y2, color) {
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+  ctx.font = '13px system-ui';
+  ctx.fillStyle = '#a7babd';
+  ctx.textAlign = 'right';
+  for (let power = -120; power <= 0; power += 20) {
+    line(left, y(power), right, y(power), '#304046');
+    ctx.fillText(power, left - 9, y(power) + 4);
+  }
+  const ticks = width < 540 ? [low, 2e9, 4e9, high] : [low, 1e9, 2e9, 3e9, 4e9, 5e9, high];
+  for (const hz of ticks) {
+    const px = x((hz - low) / (high - low));
+    line(px, top, px, bottom, '#304046');
+    ctx.textAlign = hz === low ? 'left' : hz === high ? 'right' : 'center';
+    ctx.fillText(hz === low ? '70 MHz' : hz / 1e9 + ' GHz', px, bottom + 22);
+  }
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(left, top, right - left, bottom - top);
+  ctx.clip();
+  ctx.beginPath();
+  ctx.strokeStyle = '#66dec5';
+  let connected = false;
+  values.forEach((power, index) => {
+    if (power === null) { connected = false; return; }
+    const px = x((index + 0.5) / values.length);
+    if (connected) ctx.lineTo(px, y(power));
+    else ctx.moveTo(px, y(power));
+    connected = true;
+  });
+  ctx.stroke();
+  ctx.restore();
+  reading.textContent = 'Power · dBFS';
+  if (cursor !== null && cursor >= left && cursor <= right && values.length) {
+    const fraction = (cursor - left) / (right - left);
+    const index = Math.min(Math.floor(fraction * values.length), values.length - 1);
+    const power = values[index];
+    line(cursor, top, cursor, bottom, '#c1d2d5');
+    reading.textContent = frequencyLabel(low + (index + 0.5) / values.length * (high - low))
+      + (power === null ? ' · No data' : ' · ' + power.toFixed(1) + ' dBFS');
+  }
+}
+
+function render() {
+  if (!latest) return;
+  const mode = latest.demo ? 'Demo' : 'B210';
+  const status = latest.error ? ' · Retrying' : frozen ? ' · Trace frozen' : ' · Sweeping';
+  if (state.textContent !== mode + status) state.textContent = mode + status;
+  progress.value = latest.progress;
+  const changed = !frozen && shown?.number !== latest.number;
+  if (!frozen) shown = latest;
+  const sweep = shown?.number ? 'Sweep ' + shown.number + ' · ' + shown.seconds + ' s per pass. ' : '';
+  detail.textContent = latest.error || sweep + 'Each trace combines sequential receiver captures.';
+  if (changed) draw();
+}
+
+freeze.addEventListener('click', () => {
+  frozen = !frozen;
+  freeze.textContent = frozen ? 'Resume trace' : 'Freeze trace';
+  freeze.setAttribute('aria-pressed', frozen);
+  render();
+});
+plot.addEventListener('pointermove', event => { cursor = event.offsetX; draw(); });
+plot.addEventListener('pointerleave', () => { cursor = null; draw(); });
+new ResizeObserver(draw).observe(plot);
+
+async function poll() {
+  try {
+    const response = await fetch('/api/sweep');
+    if (!response.ok) throw new Error(response.status);
+    latest = await response.json();
+    render();
+  } catch {
+    state.textContent = 'Disconnected · Retrying';
+  } finally {
+    setTimeout(poll, 350);
+  }
+}
+poll();
+</script>
+</html>

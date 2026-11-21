@@ -39,3 +39,17 @@ Testing used UHD `4.11.0.HEAD-0-g0d7ed3b1` on Linux with `benchmark_rate`, recep
 | 2 | 30.72 MS/s | 61.44 MS/s | 65 s and 120 s |
 
 Both configurations recorded zero dropped samples, overruns, RX sequence errors, and RX timeouts in those runs. With the default receive queue, both peak rates produced intermittent overruns, and one channel at 56 MS/s passed a 65-second run. UHD reported a 56 MHz analog receive filter bandwidth during the 61.44 MS/s test. [UHD B2x0 manual](https://files.ettus.com/manual/page_usrp_b200.html)
+
+## Web spectrum dashboard
+
+On the computer connected to the B210, install NumPy and use a Python 3 interpreter that can import the UHD bindings from your UHD installation. Connect the antenna to RX2 on channel 0, then run:
+
+```sh
+python3 src/spectrum/server.py
+```
+
+Open [the local spectrum dashboard](http://127.0.0.1:8000). The receiver continuously sweeps the B210's 70 MHz–6 GHz range with overlapping retunes at 56 MS/s and up to 56 MHz of analog receive bandwidth. The sweep trims capture edges where the receiver filter can attenuate signals and uses a 3,072-point FFT at the default rate. The default UHD arguments use `num_recv_frames=128`. Include that argument when overriding `--device` to retain the same queue depth. The dashboard shows the latest completed pass and the progress of the current one. Hover to read frequency and power, or freeze the displayed trace for inspection while the receiver keeps scanning.
+
+The trace shows the strongest FFT bin in each display interval, in dBFS relative to digital full scale. This is a sequential sweep, so short bursts can fall between visits to their frequencies. If USB reception is unstable, try `--rate 40` or `--rate 20`. Use `--gain` to set RX gain, `--antenna TX/RX` to select the other input, or `--device` to pass custom UHD device arguments, including an explicit FPGA image if needed.
+
+To try the dashboard with simulated data, add `--demo`. This mode requires NumPy and runs without UHD or a radio.
