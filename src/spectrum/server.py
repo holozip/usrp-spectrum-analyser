@@ -20,6 +20,7 @@ DETAIL_BINS = DISPLAY_BINS * BINS_PER_OVERVIEW
 OVERVIEW_WIDTH = (HIGH - LOW) / DISPLAY_BINS
 FFT_SIZE = 16384
 PAGE = Path(__file__).with_name("index.html")
+BUNDLED_RETUNE_IMAGE = Path(__file__).resolve().parents[2] / "resources/firmware/usrp_b210_retune.bin"
 PEAK_BUCKET_SECONDS = 0.2
 CONTINUOUS_UPDATE_SECONDS = 0.04
 DETAIL_WIDTH = (HIGH - LOW) / DETAIL_BINS
@@ -337,8 +338,8 @@ def main():
     parser.add_argument("--antenna", choices=["RX2", "TX/RX"], default="RX2")
     parser.add_argument("--spur-reference", type=Path,
                         help="terminated 56 MS/s reference archive for optional display suppression")
-    parser.add_argument("--fpga-band-sweep", type=Path,
-                        help="load the Fast Lock FPGA image and calibrate only at band transitions")
+    parser.add_argument("--fpga-band-sweep", nargs="?", type=Path, const=BUNDLED_RETUNE_IMAGE,
+                        help="enable Fast Lock with the bundled image or an explicit image path")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
     if not 4 <= args.rate <= MAX_RATE:

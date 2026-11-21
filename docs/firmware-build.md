@@ -57,6 +57,12 @@ make firmware-install
 - [Hardware schematic (PDF)](hardware-schematic/USRP_B210.pdf)
 - [Mechanical drawing (DWG)](mechanical-drawings/PCB.DWG) and [3D model (STEP)](mechanical-drawings/PCB.step)
 
+## Install the prebuilt Fast Lock image
+
+For the Kintex-7 clone documented in this repository, use `sudo make firmware-install-retune` to copy the checked-in, checksum-verified image to `/usr/local/share/uhd/images/usrp_b210_retune.bin`. Choose that file explicitly with the dashboard's `--fpga-band-sweep` option, or supply the flag by itself to load the copy in `resources/firmware/` directly. The standard UHD filename `usrp_b210_fpga.bin` remains available for normal operation.
+
+The bundled Vivado 2026.1 image is the timing-clean calibration-polling candidate used for the live calibration and dashboard tests below.
+
 ## Two-hop RX Fast Lock prototype
 
 The prototype adds a tagged command and status mailbox to radio 0's UHD user settings. The FPGA owns the existing SPI core while executing a command. It recalls a preloaded AD9361 RX profile, waits 50 µs, and polls the RX PLL status with a finite retry limit. The host still requests each hop, waits for the FPGA response, reads the IQ burst, and runs the dashboard's eight 16,384-point FFTs. Profile calibration and loading are outside the timed loop.

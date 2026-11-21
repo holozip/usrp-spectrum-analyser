@@ -56,11 +56,22 @@ To try the dashboard with simulated data, add `--demo`. This mode requires NumPy
 
 The optional `--spur-reference PATH` enables a raw/filtered checkbox in the dashboard. Supply an NPZ archive with a `baseline` array of at least three full-resolution dBFS sweeps recorded with a 50 Ω terminator at 56 MS/s and the same receiver gain and antenna-port settings. Each row must contain the 1,572,864 little-endian float32 bins returned by `/api/detail/<sweep-number>`. Filtering estimates excess power near measured 40 and 56 MHz clock harmonics. It affects the display and can reduce or distort signals sharing a corrected bin.
 
-To use the experimental band-only FPGA sweep, start the dashboard with `--fpga-band-sweep` and the calibration-polling FPGA image. For the TX/RX port:
+### Bundled FPGA image
+
+The repository includes the timing-verified Fast Lock image for the **Kintex-7 XC7K325T B210 clone described above**. Check your board's FPGA and pinout before using it. From the checkout, start the dashboard with the bundled image directly:
 
 ```sh
-python3 src/spectrum/server.py --antenna TX/RX \
-  --fpga-band-sweep build/retune-cal-poll/usrp_b210_retune.bin
+python3 src/spectrum/server.py --antenna TX/RX --fpga-band-sweep
 ```
 
-The server prepares Fast Lock profiles when it opens the radio. It then calibrates at the first hop and the three receiver band transitions per pass. The status reads **B210 FPGA** when this mode is active. The mode requires 56 MS/s, keeps 56 MHz analog bandwidth, and uses the same eight 16,384-point FFT blocks per hop.
+To install a system-wide copy for use outside the checkout:
+
+```sh
+sudo make firmware-install-retune
+python3 src/spectrum/server.py --antenna TX/RX \
+  --fpga-band-sweep /usr/local/share/uhd/images/usrp_b210_retune.bin
+```
+
+The install target verifies the bundled checksum and places the image alongside the normal UHD image. Both paths use UHD to load the selected image into FPGA RAM when opening the device. Vivado is required only to rebuild the image.
+
+The server prepares Fast Lock profiles when it opens the radio. It then calibrates at the first hop and the three receiver band transitions per full pass. The status reads **B210 FPGA** when this mode is active. The mode requires 56 MS/s, keeps 56 MHz analog bandwidth, and uses the same eight 16,384-point FFT blocks per hop.
