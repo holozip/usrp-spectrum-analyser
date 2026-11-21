@@ -1,0 +1,22 @@
+# Generated firmware build state and artifacts.
+/build/
+
+# Local IDE and editor files.
+/.idea/
+*.swp
+
+# Guard against opening the source project directly in Vivado.
+/src/firmware/B210_Project_Firmwire.*/
+/src/firmware/.Xil/
+
+# Vivado logs and journals.
+/.Xil/
+/vivado.jou
+/vivado.log
+/vivado_*.backup.jou
+/vivado_*.backup.log
+/src/firmware/**/*.jou
+/src/firmware/**/*.log
+/src/firmware/**/*.str
+/src/firmware/**/*.wdf
+/src/firmware/**/*.wpc
