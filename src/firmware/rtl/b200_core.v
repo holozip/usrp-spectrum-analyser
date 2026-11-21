@@ -185,6 +185,17 @@ module b200_core
 
     wire spi_ready;
     wire [31:0] spi_readback;
+    wire retune_busy, retune_spi_strobe, retune_request_valid, retune_request_ready;
+    wire retune_request_ready_internal;
+    wire [7:0] retune_spi_address;
+    wire [31:0] retune_spi_data, retune_request, retune_result;
+    wire retune_valid_r, retune_result_valid, retune_result_ready, retune_status_valid;
+    wire [31:0] retune_command_r, retune_status_data;
+    reg [31:0] retune_status_r, calibration_status_r;
+    reg [7:0] codec_spi_select, calibration_count_r;
+    wire calibration_start = set_stb && set_addr == SR_CORE_SPI + 2 &&
+                             codec_spi_select == 8'd1 && set_data[31:8] == 24'h801602;
+
 
     wire [7:0] gpsdo_st;
     wire [7:0] radio_st;
@@ -209,7 +220,7 @@ module b200_core
       .resp_tdata(l0_resp_tdata), .resp_tlast(l0_resp_tlast), .resp_tvalid(l0_resp_tvalid), .resp_tready(l0_resp_tready),
       .vita_time(64'b0),
       .set_stb(set_stb), .set_addr(set_addr), .set_data(set_data),
-      .ready(spi_ready), .readback(rb_data),
+      .ready(spi_ready && !retune_busy), .readback(rb_data),
       .debug());
 
     setting_reg #(.my_addr(SR_CORE_MISC), .awidth(8), .width(32), .at_reset(8'h0)) sr_misc
@@ -231,9 +242,48 @@ module b200_core
     synchronizer time_sync_synchronizer
      (.clk(radio_clk), .rst(radio_rst), .in(time_sync), .out(time_sync_r));
 
+    axi_fifo_2clk #(.WIDTH(32), .SIZE(0)) retune_request_fifo
+     (.reset(radio_rst), .i_aclk(radio_clk), .i_tdata(retune_command_r),
+      .i_tvalid(retune_valid_r), .i_tready(), .o_aclk(bus_clk),
+      .o_tdata(retune_request), .o_tvalid(retune_request_valid), .o_tready(retune_request_ready));
+
+    axi_fifo_2clk #(.WIDTH(32), .SIZE(0)) retune_result_fifo
+     (.reset(bus_rst), .i_aclk(bus_clk), .i_tdata(retune_result),
+      .i_tvalid(retune_result_valid), .i_tready(retune_result_ready), .o_aclk(radio_clk),
+      .o_tdata(retune_status_data), .o_tvalid(retune_status_valid), .o_tready(1'b1));
+
+    always @(posedge bus_clk)
+      if (bus_rst) codec_spi_select <= 0;
+      else if (retune_spi_strobe && retune_spi_address == SR_CORE_SPI + 1)
+        codec_spi_select <= retune_spi_data[7:0];
+      else if (set_stb && set_addr == SR_CORE_SPI + 1)
+        codec_spi_select <= set_data[7:0];
+
+    always @(posedge radio_clk)
+      if (radio_rst) begin
+         retune_status_r <= 0;
+         calibration_status_r <= 0;
+         calibration_count_r <= 0;
+      end else if (retune_status_valid) begin
+         if (retune_status_data[31:25] == 0) begin
+            calibration_status_r <= retune_status_data;
+            calibration_count_r <= calibration_count_r + 1'b1;
+         end else retune_status_r <= retune_status_data;
+      end
+
+    rx_retune retuner
+     (.clk(bus_clk), .reset(bus_rst), .calibration_start(calibration_start), .command(retune_request),
+      .command_valid(retune_request_valid && !set_stb), .command_ready(retune_request_ready_internal),
+      .spi_ready(spi_ready), .spi_readback(spi_readback[7:0]), .busy(retune_busy),
+      .spi_strobe(retune_spi_strobe), .spi_address(retune_spi_address), .spi_data(retune_spi_data),
+      .result(retune_result), .result_valid(retune_result_valid), .result_ready(retune_result_ready));
+    assign retune_request_ready = retune_request_ready_internal && !set_stb;
+
     simple_spi_core #(.BASE(SR_CORE_SPI), .WIDTH(8), .CLK_IDLE(0), .SEN_IDLE(8'hFF)) misc_spi
      (.clock(bus_clk), .reset(bus_rst),
-      .set_stb(set_stb), .set_addr(set_addr), .set_data(set_data),
+      .set_stb(retune_busy ? retune_spi_strobe : set_stb),
+      .set_addr(retune_busy ? retune_spi_address : set_addr),
+      .set_data(retune_busy ? retune_spi_data : set_data),
       .readback(spi_readback), .ready(spi_ready),
       .sen(sen), .sclk(sclk), .mosi(mosi), .miso(miso),
       .debug());
@@ -307,7 +357,7 @@ module b200_core
       .NEW_HB_INTERP(1),
       .NEW_HB_DECIM(1),
       .SOURCE_FLOW_CONTROL(0),
-      .USER_SETTINGS(0),
+      .USER_SETTINGS(1),
       .DEVICE("7SERIES")
    ) radio_0 (
       .radio_clk(radio_clk), .radio_rst(radio_rst),
@@ -319,6 +369,8 @@ module b200_core
       .rx_tdata(r0_rx_tdata), .rx_tlast(r0_rx_tlast),  .rx_tvalid(r0_rx_tvalid), .rx_tready(r0_rx_tready),
       .ctrl_tdata(r0_ctrl_tdata), .ctrl_tlast(r0_ctrl_tlast),  .ctrl_tvalid(r0_ctrl_tvalid), .ctrl_tready(r0_ctrl_tready),
       .resp_tdata(r0_resp_tdata), .resp_tlast(r0_resp_tlast),  .resp_tvalid(r0_resp_tvalid), .resp_tready(r0_resp_tready),
+      .retune_valid(retune_valid_r), .retune_command(retune_command_r), .retune_status(retune_status_r),
+      .calibration_status({24'h524443, calibration_count_r, calibration_status_r}),
       .debug(radio0_debug)
    );
 
@@ -351,6 +403,7 @@ module b200_core
       .rx_tdata(r1_rx_tdata), .rx_tlast(r1_rx_tlast),  .rx_tvalid(r1_rx_tvalid), .rx_tready(r1_rx_tready),
       .ctrl_tdata(r1_ctrl_tdata), .ctrl_tlast(r1_ctrl_tlast),  .ctrl_tvalid(r1_ctrl_tvalid), .ctrl_tready(r1_ctrl_tready),
       .resp_tdata(r1_resp_tdata), .resp_tlast(r1_resp_tlast),  .resp_tvalid(r1_resp_tvalid), .resp_tready(r1_resp_tready),
+      .retune_valid(), .retune_command(), .retune_status(32'b0), .calibration_status(64'b0),
       .debug(radio1_debug)
    );
 `else

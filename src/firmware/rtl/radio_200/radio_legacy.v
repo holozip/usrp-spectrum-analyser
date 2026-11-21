@@ -31,6 +31,8 @@ module radio_legacy
    input [63:0]  ctrl_tdata, input ctrl_tlast, input ctrl_tvalid, output ctrl_tready,
    output [63:0] resp_tdata, output resp_tlast, output resp_tvalid, input resp_tready,
 
+   output retune_valid, output [31:0] retune_command,
+   input [31:0] retune_status, input [63:0] calibration_status,
    output reg [63:0] vita_time_b,
 
    output [63:0] debug
@@ -198,6 +200,8 @@ generate
       // regs->poke32(4, 0xBEEF);
       // std::cout << boost::format("0x%016X") % regs->peek64(0) << std::endl;
       wire [31:0] user_reg_0_value, user_reg_1_value;
+      assign retune_valid = set_stb_user && set_addr_user == 8'd2;
+      assign retune_command = set_data_user;
 
       setting_reg #(.my_addr(8'd0), .awidth(8), .width(32)) user_reg_0
         (.clk(radio_clk), .rst(radio_rst), .strobe(set_stb_user), .addr(set_addr_user), .in(set_data_user),
@@ -210,12 +214,16 @@ generate
       always @* begin
          case(rb_addr_user)
             8'd0 : rb_data_user <= {user_reg_1_value, user_reg_0_value};
+            8'd1 : rb_data_user <= {32'h52584C33, retune_status};
+            8'd2 : rb_data_user <= calibration_status;
             default : rb_data_user <= 64'd0;
          endcase
       end
 
    end else begin    //for USER_SETTINGS == 1
       always @* rb_data_user <= 64'd0;
+      assign retune_valid = 1'b0;
+      assign retune_command = 32'b0;
    end
 endgenerate
 

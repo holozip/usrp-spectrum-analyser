@@ -48,10 +48,19 @@ On the computer connected to the B210, install NumPy and use a Python 3 interpre
 python3 src/spectrum/server.py
 ```
 
-Open [the local spectrum dashboard](http://127.0.0.1:8000). The receiver continuously sweeps the B210's 70 MHz–6 GHz range with overlapping retunes at 56 MS/s and up to 56 MHz of analog receive bandwidth. The sweep trims capture edges where the receiver filter can attenuate signals and uses a 16,384-point FFT (3.42 kHz FFT spacing at the default rate). The default UHD arguments use `num_recv_frames=128`. Include that argument when overriding `--device` to retain the same queue depth. The dashboard shows the latest completed pass and the progress of the current one. Hover to read frequency and power, or freeze the displayed trace for inspection while the receiver keeps scanning.
+Open [the local spectrum dashboard](http://127.0.0.1:8000). The receiver continuously sweeps the B210's 70 MHz–6 GHz range with overlapping retunes at 56 MS/s and up to 56 MHz of analog receive bandwidth. The sweep trims capture edges where the receiver filter can attenuate signals and uses a 16,384-point FFT (3.42 kHz FFT spacing at the default rate). The default UHD arguments use `num_recv_frames=128`. Include that argument when overriding `--device` to retain the same queue depth. The dashboard shows the latest completed pass and the progress of the current one. Hover to read frequency and power, or freeze the displayed trace for inspection while the receiver keeps scanning. Zooming narrows the receiver sweep to the visible range and retains the neighboring captures needed to fill DC gaps. Reset zoom resumes the full sweep. While zoomed in, the browser can request updates as often as every 40 ms. The amber Recent peaks trace retains captured peaks for roughly 200–400 ms. At 56 MS/s, zooming to 56 MHz or less automatically switches to fixed-tune continuous capture with the same FFT averaging. Narrow views keep the signal away from DC and the filter edges when possible. Wider continuous views expose the full FFT, including those regions. Use **56 MHz window** to center the full width on the current view.
 
 The overview shows the strongest FFT bin in each display interval, in dBFS relative to digital full scale. Drag across the plot to zoom into the stored high-resolution trace, which uses a 3.77 kHz display grid at maximum detail. The readout shows the current displayed bin width when zoomed. This is a sequential sweep, so short bursts can fall between visits to their frequencies. If USB reception is unstable, try `--rate 40` or `--rate 20`. Use `--gain` to set RX gain, `--antenna TX/RX` to select the other input, or `--device` to pass custom UHD device arguments, including an explicit FPGA image if needed.
 
 To try the dashboard with simulated data, add `--demo`. This mode requires NumPy and runs without UHD or a radio.
 
 The optional `--spur-reference PATH` enables a raw/filtered checkbox in the dashboard. Supply an NPZ archive with a `baseline` array of at least three full-resolution dBFS sweeps recorded with a 50 Ω terminator at 56 MS/s and the same receiver gain and antenna-port settings. Each row must contain the 1,572,864 little-endian float32 bins returned by `/api/detail/<sweep-number>`. Filtering estimates excess power near measured 40 and 56 MHz clock harmonics. It affects the display and can reduce or distort signals sharing a corrected bin.
+
+To use the experimental band-only FPGA sweep, start the dashboard with `--fpga-band-sweep` and the calibration-polling FPGA image. For the TX/RX port:
+
+```sh
+python3 src/spectrum/server.py --antenna TX/RX \
+  --fpga-band-sweep build/retune-cal-poll/usrp_b210_retune.bin
+```
+
+The server prepares Fast Lock profiles when it opens the radio. It then calibrates at the first hop and the three receiver band transitions per pass. The status reads **B210 FPGA** when this mode is active. The mode requires 56 MS/s, keeps 56 MHz analog bandwidth, and uses the same eight 16,384-point FFT blocks per hop.
