@@ -10,11 +10,15 @@ main { max-width: 1320px; margin: auto; padding: clamp(16px, 4vw, 56px); }
 header, .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
 h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: -.045em; }
 p { color: #a7babd; margin: 5px 0 0; }
+#spur-control[hidden] { display: none; }
+#spur-control { align-self: center; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; }
+button:disabled { opacity: .55; cursor: default; }
 button { font: inherit; color: inherit; background: #243136; border: 1px solid #53676b; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
 section { margin-top: 24px; border: 1px solid #35454a; border-radius: 14px; background: #171f23; overflow: hidden; }
 .bar { padding: 14px 18px; border-bottom: 1px solid #35454a; font-size: .92rem; }
 #state { color: #79e4ce; font-weight: 600; }
-canvas { display: block; width: 100%; height: clamp(300px, 57vh, 650px); }
+canvas { cursor: crosshair; touch-action: pan-y; display: block; width: 100%; height: clamp(300px, 57vh, 650px); }
 progress { display: block; width: 100%; height: 5px; border: 0; accent-color: #66dec5; }
 progress::-webkit-progress-bar { background: #26363b; }
 progress::-webkit-progress-value { background: #66dec5; }
@@ -23,14 +27,22 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
 <main>
   <header>
     <div><h1>B210 Spectrum</h1><p>70 MHz – 6 GHz</p></div>
-    <button id="freeze" type="button" aria-pressed="false">Freeze trace</button>
+    <div class="controls">
+      <button id="zoom-in" type="button" disabled>Zoom in</button>
+      <button id="reset" type="button" disabled>Reset zoom</button>
+      <label id="spur-control" hidden><input id="suppress-spurs" type="checkbox" checked> Suppress clock spurs</label>
+      <button id="freeze" type="button" aria-pressed="false">Freeze trace</button>
+    </div>
   </header>
   <section aria-label="Spectrum plot">
     <div class="bar"><span id="state" role="status">Connecting</span><span id="reading">Power · dBFS</span></div>
     <progress id="progress" max="1" value="0" aria-label="Current sweep progress"></progress>
     <canvas id="plot" role="img" aria-label="Received power in dBFS across 70 MHz to 6 GHz"></canvas>
   </section>
-  <footer id="detail">Each trace combines sequential receiver captures.</footer>
+  <footer>
+    <p id="detail">Each trace combines sequential receiver captures.</p>
+    <p>Drag across the plot to zoom into a frequency range.</p>
+  </footer>
 </main>
 <script>
 const plot = document.querySelector('#plot');
@@ -40,8 +52,34 @@ const progress = document.querySelector('#progress');
 const reading = document.querySelector('#reading');
 const detail = document.querySelector('#detail');
 const freeze = document.querySelector('#freeze');
-let latest, shown, frozen = false, cursor = null;
-const frequencyLabel = hz => hz >= 1e9 ? (hz / 1e9).toFixed(3) + ' GHz' : (hz / 1e6).toFixed(1) + ' MHz';
+const zoomIn = document.querySelector('#zoom-in');
+const reset = document.querySelector('#reset');
+const suppressSpurs = document.querySelector('#suppress-spurs');
+let spurCorrections = [];
+const LEFT = 58, RIGHT_MARGIN = 20;
+let latest, shown, frozen = false, cursor = null, view = null, drag = null;
+const frequencyLabel = (hz, fine = false) => hz >= 1e9 && !fine
+  ? (hz / 1e9).toFixed(3) + ' GHz'
+  : (hz / 1e6).toFixed(fine ? 4 : 1) + ' MHz';
+
+function fullRange() {
+  return [shown?.low ?? 70e6, shown?.high ?? 6e9];
+}
+
+function minimumSpan() {
+  const [low, high] = fullRange();
+  return 8 * (high - low) / (shown?.levels?.[0].length || 4096);
+}
+
+function setView(low, high) {
+  const [fullLow, fullHigh] = fullRange();
+  const span = Math.max(high - low, minimumSpan());
+  low = Math.max(fullLow, Math.min((low + high - span) / 2, fullHigh - span));
+  view = [low, low + span];
+  reset.disabled = false;
+  cursor = null;
+  draw();
+}
 
 function draw() {
   const {width, height} = plot.getBoundingClientRect();
@@ -49,9 +87,19 @@ function draw() {
   plot.width = Math.round(width * scale);
   plot.height = Math.round(height * scale);
   ctx.scale(scale, scale);
-  const left = 58, right = width - 20, top = 24, bottom = height - 34;
-  const low = shown?.low ?? 70e6, high = shown?.high ?? 6e9;
-  const values = shown?.trace ?? [];
+  const left = LEFT, right = width - RIGHT_MARGIN, top = 24, bottom = height - 34;
+  if (right <= left) return;
+  const [fullLow, fullHigh] = fullRange();
+  const [low, high] = view ?? [fullLow, fullHigh];
+  const fullSpan = fullHigh - fullLow;
+  const span = high - low;
+  const fineLabels = span < 20e6;
+  const filtered = suppressSpurs.checked && spurCorrections.length && shown?.levels ? filteredTrace(shown) : shown;
+  const values = (view && filtered?.levels?.find(level => level.length * span / fullSpan <= 4096))
+    || filtered?.trace || [];
+  const binWidth = fullSpan / values.length;
+  const first = Math.max(0, Math.floor((low - fullLow) / binWidth) - 1);
+  const last = Math.min(values.length, Math.ceil((high - fullLow) / binWidth) + 1);
   const x = fraction => left + fraction * (right - left);
   const y = power => bottom - (power + 120) / 120 * (bottom - top);
   function line(x1, y1, x2, y2, color) {
@@ -68,12 +116,17 @@ function draw() {
     line(left, y(power), right, y(power), '#304046');
     ctx.fillText(power, left - 9, y(power) + 4);
   }
-  const ticks = width < 540 ? [low, 2e9, 4e9, high] : [low, 1e9, 2e9, 3e9, 4e9, 5e9, high];
+  const divisions = width < 540 ? 2 : 4;
+  zoomIn.disabled = !values.length || high - low <= minimumSpan() + 1;
+  const ticks = view ? Array.from({length: divisions + 1}, (_, index) =>
+    low + index * (high - low) / divisions
+  ) : width < 540 ? [low, 2e9, 4e9, high] : [low, 1e9, 2e9, 3e9, 4e9, 5e9, high];
   for (const hz of ticks) {
     const px = x((hz - low) / (high - low));
     line(px, top, px, bottom, '#304046');
     ctx.textAlign = hz === low ? 'left' : hz === high ? 'right' : 'center';
-    ctx.fillText(hz === low ? '70 MHz' : hz / 1e9 + ' GHz', px, bottom + 22);
+    const label = view ? frequencyLabel(hz, fineLabels) : hz === low ? '70 MHz' : hz / 1e9 + ' GHz';
+    ctx.fillText(label, px, bottom + 22);
   }
   ctx.save();
   ctx.beginPath();
@@ -82,23 +135,33 @@ function draw() {
   ctx.beginPath();
   ctx.strokeStyle = '#66dec5';
   let connected = false;
-  values.forEach((power, index) => {
-    if (power === null) { connected = false; return; }
-    const px = x((index + 0.5) / values.length);
+  for (let index = first; index < last; index++) {
+    const power = values[index];
+    if (!Number.isFinite(power)) { connected = false; continue; }
+    const hz = fullLow + (index + 0.5) * binWidth;
+    const px = x((hz - low) / (high - low));
     if (connected) ctx.lineTo(px, y(power));
     else ctx.moveTo(px, y(power));
     connected = true;
-  });
+  }
   ctx.stroke();
   ctx.restore();
-  reading.textContent = 'Power · dBFS';
+  if (drag) {
+    ctx.fillStyle = '#66dec533';
+    ctx.fillRect(Math.min(drag.start, drag.end), top, Math.abs(drag.end - drag.start), bottom - top);
+  }
+  const resolution = view && values.length
+    ? ' · ' + (binWidth / 1000).toLocaleString(undefined, {maximumFractionDigits: 1}) + ' kHz/bin'
+    : '';
+  reading.textContent = 'Power · dBFS' + resolution;
   if (cursor !== null && cursor >= left && cursor <= right && values.length) {
     const fraction = (cursor - left) / (right - left);
-    const index = Math.min(Math.floor(fraction * values.length), values.length - 1);
+    const hz = low + fraction * (high - low);
+    const index = Math.min(Math.floor((hz - fullLow) / (fullHigh - fullLow) * values.length), values.length - 1);
     const power = values[index];
     line(cursor, top, cursor, bottom, '#c1d2d5');
-    reading.textContent = frequencyLabel(low + (index + 0.5) / values.length * (high - low))
-      + (power === null ? ' · No data' : ' · ' + power.toFixed(1) + ' dBFS');
+    reading.textContent = frequencyLabel(fullLow + (index + 0.5) * binWidth, fineLabels)
+      + (Number.isFinite(power) ? ' · ' + power.toFixed(1) + ' dBFS' : ' · No data') + resolution;
   }
 }
 
@@ -121,15 +184,112 @@ freeze.addEventListener('click', () => {
   freeze.setAttribute('aria-pressed', frozen);
   render();
 });
-plot.addEventListener('pointermove', event => { cursor = event.offsetX; draw(); });
+zoomIn.addEventListener('click', () => {
+  const [low, high] = view ?? fullRange();
+  const quarter = (high - low) / 4;
+  setView(low + quarter, high - quarter);
+});
+reset.addEventListener('click', () => {
+  view = null;
+  cursor = null;
+  reset.disabled = true;
+  draw();
+});
+
+plot.addEventListener('pointerdown', event => {
+  if (!event.isPrimary || event.button !== 0 || !shown?.trace?.length) return;
+  const right = plot.clientWidth - RIGHT_MARGIN;
+  if (event.offsetX < LEFT || event.offsetX > right || event.offsetY < 24
+      || event.offsetY > plot.clientHeight - 34) return;
+  drag = {id: event.pointerId, start: event.offsetX, end: event.offsetX};
+  plot.setPointerCapture(event.pointerId);
+});
+plot.addEventListener('pointermove', event => {
+  if (!event.isPrimary) return;
+  cursor = event.offsetX;
+  if (drag?.id === event.pointerId) {
+    drag.end = Math.max(LEFT, Math.min(cursor, plot.clientWidth - RIGHT_MARGIN));
+  }
+  draw();
+});
+plot.addEventListener('pointerup', event => {
+  if (drag?.id !== event.pointerId) return;
+  const {start} = drag;
+  drag = null;
+  const right = plot.clientWidth - RIGHT_MARGIN;
+  const end = Math.max(LEFT, Math.min(event.offsetX, right));
+  if (Math.abs(end - start) < 8) {
+    draw();
+    return;
+  }
+  const [low, high] = view ?? fullRange();
+  const hz = px => low + (px - LEFT) / (right - LEFT) * (high - low);
+  setView(hz(Math.min(start, end)), hz(Math.max(start, end)));
+});
+plot.addEventListener('lostpointercapture', () => { drag = null; draw(); });
 plot.addEventListener('pointerleave', () => { cursor = null; draw(); });
 new ResizeObserver(draw).observe(plot);
+
+function groupPeaks(values, size) {
+  const grouped = new Float32Array(values.length / size);
+  for (let i = 0; i < grouped.length; i++) {
+    let peak = -Infinity;
+    for (let j = 0; j < size; j++) peak = Math.max(peak, values[i * size + j]);
+    grouped[i] = peak;
+  }
+  return grouped;
+}
+
+function zoomLevels(level) {
+  const levels = [level];
+  while (level.length > 4096 && level.length % 2 === 0) {
+    level = groupPeaks(level, 2);
+    levels.push(level);
+  }
+  return levels;
+}
+
+function filteredTrace(frame) {
+  if (frame.filtered) return frame.filtered;
+  const bins = frame.levels[0].slice();
+  for (const [index, spur, floor] of spurCorrections) {
+    const power = 10 ** (bins[index] / 10);
+    bins[index] = 10 * Math.log10(Math.min(power, Math.max(floor, power - spur)));
+  }
+  const levels = zoomLevels(bins);
+  frame.filtered = {levels, trace: groupPeaks(bins, bins.length / frame.trace.length)};
+  return frame.filtered;
+}
+
+suppressSpurs.addEventListener('change', draw);
+async function loadSpurReference() {
+  try {
+    const response = await fetch('/api/spurs');
+    if (!response.ok) return;
+    spurCorrections = await response.json();
+    document.querySelector('#spur-control').hidden = !spurCorrections.length;
+    draw();
+  } catch {
+    // Raw viewing remains available if the optional reference cannot be loaded.
+  }
+}
+loadSpurReference();
 
 async function poll() {
   try {
     const response = await fetch('/api/sweep');
     if (!response.ok) throw new Error(response.status);
-    latest = await response.json();
+    const frame = await response.json();
+    if (frame.number && frame.number !== latest?.number) {
+      const detailResponse = await fetch('/api/detail/' + frame.number);
+      if (detailResponse.status === 404) return; // A newer sweep replaced this one.
+      if (!detailResponse.ok) throw new Error(detailResponse.status);
+      frame.levels = zoomLevels(new Float32Array(await detailResponse.arrayBuffer()));
+    } else {
+      frame.levels = latest?.levels;
+      frame.filtered = latest?.filtered;
+    }
+    latest = frame;
     render();
   } catch {
     state.textContent = 'Disconnected · Retrying';
