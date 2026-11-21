@@ -1,77 +1,30 @@
-# B210 clone FPGA firmware
+# USRP B210 spectrum analyser
 
-This project builds an FPGA image for the Kintex-7 B210 clone that UHD identifies as `Custom_SDR_B210` (`product=B210`, `type=b200`). The Vivado target is `xc7k325tffg676-2`. Check your board's FPGA and pinout against the [clone schematic](docs/hardware-schematic/USRP_B210.pdf) before loading the image.
+A receive-only web dashboard for the **Kintex-7 B210 clone** identified by UHD as `Custom_SDR_B210` (`type=b200,product=B210`). It sweeps 70 MHz–6 GHz and switches to continuous capture when the zoom fits within 56 MHz.
 
-## Build
+Before loading the bundled FPGA image, verify that your board matches the `xc7k325tffg676-2` FPGA and pinout in the [clone schematic](docs/hardware-schematic/USRP_B210.pdf).
 
-On Linux, install GNU Make, Bash, Python 3, GNU coreutils, and `flock`. Install AMD Vivado 2026.x with the target Kintex-7 device files and a valid Vivado license. The clean build was verified with Vivado 2026.1, build 6511674. [AMD Vivado licensing requirements](https://docs.amd.com/r/2026.1-English/ug973-vivado-release-notes-install-license/Supported-Devices-and-Features)
+## Run the dashboard
 
-Run the build from the repository root.
-
-```sh
-JOBS=8 make firmware-build
-```
-
-Set `VIVADO=/path/to/vivado` if the launcher is outside your `PATH`. The build writes `build/firmware/usrp_b210_fpga.bin` and saves its log to `build/firmware/build.log`. [Build and diagnostics guide](docs/firmware-build.md)
-
-## Verify and install
-
-Use UHD to probe the built image directly. Check that radio initialization and both register loopback tests pass.
-
-```sh
-uhd_usrp_probe --args "type=b200,fpga=$PWD/build/firmware/usrp_b210_fpga.bin"
-```
-
-The install target copies the image to `/usr/local/share/uhd/images/usrp_b210_fpga.bin`. With a UHD installation that uses that directory, install the image and probe again using UHD's default selection.
-
-```sh
-sudo make firmware-install
-uhd_usrp_probe --args type=b200
-```
-
-## Verified RX rates
-
-Testing used UHD `4.11.0.HEAD-0-g0d7ed3b1` on Linux with `benchmark_rate`, reception over USB 3, 16-bit complex I/Q on the wire (`sc16`), float complex samples on the host (`fc32`), and `num_recv_frames=128` in the UHD device arguments.
-
-| RX channels | Rate per channel | Combined rate | Drop-free runs |
-| --- | ---: | ---: | --- |
-| 1 | 61.44 MS/s | 61.44 MS/s | 65 s and 120 s |
-| 2 | 30.72 MS/s | 61.44 MS/s | 65 s and 120 s |
-
-Both configurations recorded zero dropped samples, overruns, RX sequence errors, and RX timeouts in those runs. With the default receive queue, both peak rates produced intermittent overruns, and one channel at 56 MS/s passed a 65-second run. UHD reported a 56 MHz analog receive filter bandwidth during the 61.44 MS/s test. [UHD B2x0 manual](https://files.ettus.com/manual/page_usrp_b200.html)
-
-## Web spectrum dashboard
-
-On the computer connected to the B210, install NumPy and use a Python 3 interpreter that can import the UHD bindings from your UHD installation. Connect the antenna to RX2 on channel 0, then run:
-
-```sh
-python3 src/spectrum/server.py
-```
-
-Open [the local spectrum dashboard](http://127.0.0.1:8000). The receiver continuously sweeps the B210's 70 MHz–6 GHz range with overlapping retunes at 56 MS/s and up to 56 MHz of analog receive bandwidth. The sweep trims capture edges where the receiver filter can attenuate signals and uses a 16,384-point FFT (3.42 kHz FFT spacing at the default rate). The default UHD arguments use `num_recv_frames=128`. Include that argument when overriding `--device` to retain the same queue depth. The dashboard shows the latest completed pass and the progress of the current one. Hover to read frequency and power, or freeze the displayed trace for inspection while the receiver keeps scanning. Zooming narrows the receiver sweep to the visible range and retains the neighboring captures needed to fill DC gaps. Reset zoom resumes the full sweep. While zoomed in, the browser can request updates as often as every 40 ms. The amber Recent peaks trace retains captured peaks for roughly 200–400 ms. At 56 MS/s, zooming to 56 MHz or less automatically switches to fixed-tune continuous capture with the same FFT averaging. Narrow views keep the signal away from DC and the filter edges when possible. Wider continuous views expose the full FFT, including those regions. Use **56 MHz window** to center the full width on the current view.
-
-The overview shows the strongest FFT bin in each display interval, in dBFS relative to digital full scale. Drag across the plot to zoom into the stored high-resolution trace, which uses a 3.77 kHz display grid at maximum detail. The readout shows the current displayed bin width when zoomed. This is a sequential sweep, so short bursts can fall between visits to their frequencies. If USB reception is unstable, try `--rate 40` or `--rate 20`. Use `--gain` to set RX gain, `--antenna TX/RX` to select the other input, or `--device` to pass custom UHD device arguments, including an explicit FPGA image if needed.
-
-To try the dashboard with simulated data, add `--demo`. This mode requires NumPy and runs without UHD or a radio.
-
-The optional `--spur-reference PATH` enables a raw/filtered checkbox in the dashboard. Supply an NPZ archive with a `baseline` array of at least three full-resolution dBFS sweeps recorded with a 50 Ω terminator at 56 MS/s and the same receiver gain and antenna-port settings. Each row must contain the 1,572,864 little-endian float32 bins returned by `/api/detail/<sweep-number>`. Filtering estimates excess power near measured 40 and 56 MHz clock harmonics. It affects the display and can reduce or distort signals sharing a corrected bin.
-
-### Bundled FPGA image
-
-The repository includes the timing-verified Fast Lock image for the **Kintex-7 XC7K325T B210 clone described above**. Check your board's FPGA and pinout before using it. From the checkout, start the dashboard with the bundled image directly:
+Install UHD with its Python bindings, plus NumPy, on the computer connected to the radio. From the checkout, run:
 
 ```sh
 python3 src/spectrum/server.py --antenna TX/RX --fpga-band-sweep
 ```
 
-To install a system-wide copy for use outside the checkout:
+Open the [local dashboard](http://127.0.0.1:8000). The command selects channel 0's TX/RX input and loads the bundled FPGA image into RAM. Use `--antenna RX2` for the other input. Omit `--fpga-band-sweep` for ordinary UHD operation, or use `--demo` to try the UI with NumPy alone.
 
-```sh
-sudo make firmware-install-retune
-python3 src/spectrum/server.py --antenna TX/RX \
-  --fpga-band-sweep /usr/local/share/uhd/images/usrp_b210_retune.bin
-```
+Vivado is needed only to rebuild the image. To install a system-wide copy, run `sudo make firmware-install-retune` and pass its path explicitly with `--fpga-band-sweep /usr/local/share/uhd/images/usrp_b210_retune.bin`. The target checks the bundled SHA-256 and installs alongside UHD's normal image. Stop the dashboard before opening the radio in another application. [Firmware build and validation](docs/firmware-build.md)
 
-The install target verifies the bundled checksum and places the image alongside the normal UHD image. Both paths use UHD to load the selected image into FPGA RAM when opening the device. Vivado is required only to rebuild the image.
+## Inspect a signal
 
-The server prepares Fast Lock profiles when it opens the radio. It then calibrates at the first hop and the three receiver band transitions per full pass. The status reads **B210 FPGA** when this mode is active. The mode requires 56 MS/s, keeps 56 MHz analog bandwidth, and uses the same eight 16,384-point FFT blocks per hop.
+- Drag across the plot to narrow the receiver sweep. **Reset zoom** restores the full range.
+- With live reception at 56 MS/s, a span of 56 MHz or less uses continuous capture. **56 MHz window** centers that span on the current view. Narrow views avoid DC and filter roll-off where possible. The full-width view includes both regions, where power readings can be less reliable.
+- Hover to read frequency, power in dBFS, and the displayed bin width. **Freeze trace** pauses the display while the receiver keeps collecting samples. The amber **Recent peaks** trace holds captured peaks for roughly 200–400 ms.
+- The default capture uses 56 MS/s, 56 MHz analog bandwidth, and eight 16,384-point FFT blocks per average. FFT spacing is 3.42 kHz. The stitched sweep's finest display bins are 3.77 kHz.
+
+## Receiver options
+
+- `--gain DB` sets RX gain (default 35 dB). With the ordinary UHD sweep, try `--rate 40` or `--rate 20` if USB reception is unstable. The FPGA sweep and continuous mode use 56 MS/s.
+- `--device ARGS` overrides the UHD device arguments. The default receive queue uses `num_recv_frames=128`. To use a deeper queue, pass `--device type=b200,product=B210,num_recv_frames=512`.
+- `--spur-reference PATH` enables a display filter based on a terminated 56 MS/s reference. Use an NPZ file with a `baseline` array containing at least three raw full sweeps at the same gain and antenna port. Each row contains the 1,572,864 little-endian float32 dBFS bins from `/api/detail/<sweep-number>`. Turn off **Suppress clock spurs** when checking a signal on a corrected bin.
