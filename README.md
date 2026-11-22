@@ -18,10 +18,10 @@ Vivado is needed only to rebuild the image. To install a system-wide copy, run `
 
 ## Inspect a signal
 
-- Drag across the plot to narrow the receiver sweep. **Reset zoom** restores the full range.
+- Scroll over the spectrum or waterfall to zoom around the pointer. Drag to pan, or hold **Shift** while dragging to select a range. **Full spectrum** returns to 70 MHz–6 GHz.
 - With live reception at 56 MS/s, a span of 56 MHz or less uses continuous capture. **56 MHz window** centers that span on the current view. Narrow views avoid DC and filter roll-off where possible. The full-width view includes both regions, where power readings can be less reliable.
 - Hover to read frequency, power in dBFS, and the displayed bin width. **Freeze trace** pauses the display while the receiver keeps collecting samples. Use **Peak hold** to show or hide the amber trace, which retains recent peaks for roughly 200–400 ms. The waterfall shows frequency horizontally and recent sweeps vertically, with the newest row at the top.
-- The default capture uses 56 MS/s, 56 MHz analog bandwidth, and eight 16,384-point FFT blocks per average. FFT spacing is 3.42 kHz. The stitched sweep's finest display bins are 3.77 kHz.
+- The default capture uses 56 MS/s, 56 MHz analog bandwidth, and eight 16,384-point FFT blocks per average. FFT spacing is 3.42 kHz. The stitched sweep's finest display bins are 3.77 kHz. Continuous views at 2 MHz or narrower use a 32,768-point FFT, increasing to 65,536 points at 500 kHz or narrower. At the higher resolutions, clock-spur suppression pauses because its reference uses the 16,384-point FFT.
 
 ## Receiver options
 

@@ -28,13 +28,14 @@ section { margin-top: 24px; border: 1px solid #35454a; border-radius: 14px; back
 .bar { padding: 14px 18px; border-bottom: 1px solid #35454a; font-size: .92rem; }
 #peak-key { color: #f6b76b; }
 #state { color: #79e4ce; font-weight: 600; }
-#plot { cursor: crosshair; touch-action: pan-y; display: block; width: 100%; height: clamp(300px, 57vh, 650px); }
+#plot { cursor: grab; touch-action: pan-y; display: block; width: 100%; height: clamp(300px, 57vh, 650px); }
 #waterfall-panel { margin: 0 20px 16px 58px; }
 #waterfall-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-bottom: 6px; color: #a7babd; font-size: .82rem; }
 .waterfall-scale { display: inline-flex; align-items: center; gap: 6px; }
 .waterfall-scale i { display: inline-block; width: 66px; height: 7px; border-radius: 2px;
   background: linear-gradient(90deg, #141c2b, #265382, #11a9a4, #f1be61, #fff2d7); }
-#waterfall { display: block; width: 100%; height: clamp(120px, 22vh, 220px); background: #101519; image-rendering: pixelated; }
+#waterfall { cursor: grab; touch-action: pan-y; display: block; width: 100%; height: clamp(120px, 22vh, 220px); background: #101519; image-rendering: pixelated; }
+#plot.panning, #waterfall.panning { cursor: grabbing; }
 progress { display: block; width: 100%; height: 5px; border: 0; accent-color: #66dec5; }
 progress::-webkit-progress-bar { background: #26363b; }
 progress::-webkit-progress-value { background: #66dec5; }
@@ -60,7 +61,7 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
       </div>
       <button id="tuning-window" type="button" disabled>56 MHz window</button>
       <button id="zoom-in" type="button" disabled>Zoom in</button>
-      <button id="reset" type="button" disabled>Reset zoom</button>
+      <button id="full-spectrum" type="button" disabled>Full spectrum</button>
       <label id="spur-control" hidden>
         <input id="suppress-spurs" type="checkbox" checked aria-describedby="spur-status"> Suppress clock spurs
         <span id="spur-status" hidden></span>
@@ -84,7 +85,7 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
   </section>
   <footer>
     <p id="detail">Each trace combines sequential receiver captures.</p>
-    <p>Zoom to sweep a smaller frequency range. Reset zoom restores the full sweep.</p>
+    <p>Scroll to zoom · Drag to pan · Shift-drag to select a range</p>
   </footer>
 </main>
 <script>
@@ -115,7 +116,7 @@ const detail = document.querySelector('#detail');
 const freeze = document.querySelector('#freeze');
 const zoomIn = document.querySelector('#zoom-in');
 const tuningWindow = document.querySelector('#tuning-window');
-const reset = document.querySelector('#reset');
+const fullSpectrum = document.querySelector('#full-spectrum');
 const suppressSpurs = document.querySelector('#suppress-spurs');
 const gainControl = document.querySelector('#gain-control');
 const gainSlider = document.querySelector('#gain');
@@ -127,7 +128,7 @@ const spurControl = document.querySelector('#spur-control');
 const spurStatus = document.querySelector('#spur-status');
 let spurCorrections = [], focusError = null, gainError = null;
 let previewingGain = false, pendingGain = null;
-let rangeUpdate = Promise.resolve();
+let focusTimer, queuedFocus, sendingFocus = false;
 const LEFT = 58, RIGHT_MARGIN = 20;
 let latest, shown, frozen = false, cursor = null, view = null, drag = null;
 const frequencyLabel = (hz, fine = false) => hz >= 1e9 && !fine
@@ -144,30 +145,52 @@ function minimumSpan() {
     : 30000;
 }
 
-function requestFocus(focus) {
-  rangeUpdate = rangeUpdate.then(async () => {
-    const response = await fetch('/api/focus', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(focus)
-    });
-    if (!response.ok) throw new Error(response.status);
-    focusError = null;
-  }).catch(() => {
-    focusError = 'Could not update the receiver sweep range.';
-    render();
-  });
+function sameRange(a, b) {
+  return a === b || (a != null && b != null && a[0] === b[0] && a[1] === b[1]);
 }
 
-function setView(low, high) {
+async function requestFocus(focus) {
+  queuedFocus = focus;
+  if (sendingFocus) return;
+  sendingFocus = true;
+  while (queuedFocus !== undefined) {
+    const range = queuedFocus;
+    queuedFocus = undefined;
+    try {
+      const response = await fetch('/api/focus', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(range)
+      });
+      if (!response.ok) throw new Error(response.status);
+      focusError = null;
+    } catch {
+      focusError = 'Could not update the receiver sweep range.';
+      render();
+    }
+  }
+  sendingFocus = false;
+}
+
+function showView(low, high) {
   const [fullLow, fullHigh] = fullRange();
-  const span = Math.max(high - low, minimumSpan());
+  const span = Math.min(fullHigh - fullLow, Math.max(high - low, minimumSpan()));
   low = Math.max(fullLow, Math.min((low + high - span) / 2, fullHigh - span));
-  view = [low, low + span];
-  requestFocus(view);
-  reset.disabled = false;
-  cursor = null;
+  view = span === fullHigh - fullLow ? null : [low, low + span];
+  fullSpectrum.disabled = view === null;
   draw();
+}
+
+function commitView(delay = 0) {
+  clearTimeout(focusTimer);
+  if (delay) focusTimer = setTimeout(() => requestFocus(view), delay);
+  else requestFocus(view);
+}
+
+function setView(low, high, delay = 0) {
+  cursor = null;
+  showView(low, high);
+  commitView(delay);
 }
 
 function drawWaterfall(values, low, high, dataLow, dataHigh, corrected) {
@@ -179,7 +202,7 @@ function drawWaterfall(values, low, high, dataLow, dataHigh, corrected) {
     waterfallKey = key;
     waterfallFrame = undefined;
   }
-  if (frozen || waterfallFrame === shown.number) return;
+  if (frozen || !sameRange(shown.capture_focus, view) || waterfallFrame === shown.number) return;
 
   const binsPerHz = values.length / (dataHigh - dataLow);
   const hzPerPixel = (high - low) / width;
@@ -279,12 +302,12 @@ function draw() {
   if (peaks) drawTrace(peaks, '#f6b76baa');
   drawTrace(values, '#66dec5');
   ctx.restore();
-  if (drag) {
+  if (drag?.select) {
     ctx.fillStyle = '#66dec533';
     ctx.fillRect(Math.min(drag.start, drag.end), top, Math.abs(drag.end - drag.start), bottom - top);
   }
   const resolution = view && values.length
-    ? ' · ' + (binWidth / 1000).toLocaleString(undefined, {maximumFractionDigits: 1}) + ' kHz/bin'
+    ? ' · ' + (binWidth / 1000).toLocaleString(undefined, {maximumFractionDigits: 2}) + ' kHz/bin'
     : '';
   reading.textContent = 'Power · dBFS' + resolution;
   if (cursor !== null && cursor >= left && cursor <= right && values.length) {
@@ -300,14 +323,16 @@ function draw() {
 }
 
 function spurReferenceMatches(frame) {
-  return frame?.gain != null && frame.gain === frame.spur_reference_gain;
+  return frame?.gain != null && frame.gain === frame.spur_reference_gain && frame.fft_size === 16384;
 }
 
 function updateSpurControl() {
   spurControl.hidden = !spurCorrections.length;
   spurStatus.hidden = !suppressSpurs.checked || spurReferenceMatches(shown);
   if (!spurStatus.hidden) {
-    spurStatus.textContent = 'Paused · reference at ' + latest.spur_reference_gain + ' dB';
+    spurStatus.textContent = shown?.fft_size > 16384
+      ? 'Paused · reference uses 16k FFT'
+      : 'Paused · reference at ' + latest.spur_reference_gain + ' dB';
   }
 }
 
@@ -332,12 +357,14 @@ function render() {
   const sweep = shown?.number ? (focused ? 'Focused sweep' : 'Full sweep') + ' · '
     + shown.hops + ' hops · ' + shown.seconds + ' s per pass' : 'Waiting for the first sweep';
   const capture = shown?.continuous
-    ? (shown.detail_offset === null ? 'Full 56 MHz window · DC and filter edges visible' : 'Fixed tuning')
-      + ' · 56 MS/s · Eight FFT averages' + (shown.gaps ? ' · RX gaps ' + shown.gaps : '')
+    ? (shown.full_window ? 'Full 56 MHz window · DC and filter edges visible' : 'Fixed tuning')
+      + ' · 56 MS/s · ' + shown.fft_size.toLocaleString() + '-point FFT · 8 averages' + (shown.gaps ? ' · RX gaps ' + shown.gaps : '')
     : sweep;
   const gainPending = pendingGain !== null || (!latest.demo && latest.gain != null
     && latest.gain !== Math.trunc(latest.requested_gain));
-  detail.textContent = latest.error || focusError || gainError || (gainPending ? 'Applying RX gain…' : capture);
+  const rangePending = latest.number && !frozen && !sameRange(latest.capture_focus, view);
+  detail.textContent = latest.error || focusError || gainError
+    || (gainPending ? 'Applying RX gain…' : rangePending ? 'Updating frequency range…' : capture);
   if (changed) draw();
 }
 
@@ -359,46 +386,104 @@ zoomIn.addEventListener('click', () => {
   const quarter = (high - low) / 4;
   setView(low + quarter, high - quarter);
 });
-reset.addEventListener('click', () => {
-  view = null;
-  requestFocus(null);
-  cursor = null;
-  reset.disabled = true;
-  draw();
-});
+fullSpectrum.addEventListener('click', () => setView(...fullRange()));
 
-plot.addEventListener('pointerdown', event => {
-  if (!event.isPrimary || event.button !== 0 || !shown?.trace?.length) return;
-  const right = plot.clientWidth - RIGHT_MARGIN;
-  if (event.offsetX < LEFT || event.offsetX > right || event.offsetY < 24
-      || event.offsetY > plot.clientHeight - 34) return;
-  drag = {id: event.pointerId, start: event.offsetX, end: event.offsetX};
-  plot.setPointerCapture(event.pointerId);
-});
-plot.addEventListener('pointermove', event => {
-  if (!event.isPrimary) return;
-  cursor = event.offsetX;
-  if (drag?.id === event.pointerId) {
-    drag.end = Math.max(LEFT, Math.min(cursor, plot.clientWidth - RIGHT_MARGIN));
-  }
-  draw();
-});
-plot.addEventListener('pointerup', event => {
-  if (drag?.id !== event.pointerId) return;
-  const {start} = drag;
-  drag = null;
-  const right = plot.clientWidth - RIGHT_MARGIN;
-  const end = Math.max(LEFT, Math.min(event.offsetX, right));
-  if (Math.abs(end - start) < 8) {
+function plotPoint(event, surface) {
+  const bounds = surface.getBoundingClientRect();
+  const left = surface === plot ? LEFT : 0;
+  const width = bounds.width - (surface === plot ? LEFT + RIGHT_MARGIN : 0);
+  return {fraction: (event.clientX - bounds.left - left) / width, width};
+}
+
+function limitFraction(fraction) {
+  return Math.max(0, Math.min(1, fraction));
+}
+
+for (const surface of [plot, waterfall]) {
+  surface.addEventListener('wheel', event => {
+    if (!shown?.trace?.length || drag) return;
+    const {fraction, width} = plotPoint(event, surface);
+    if (fraction < 0 || fraction > 1) return;
+    event.preventDefault();
+    const [low, high] = view ?? fullRange();
+    const span = high - low;
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY) && !event.ctrlKey) {
+      const shift = span * event.deltaX * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? width : 1) / width;
+      setView(low + shift, high + shift, 120);
+      return;
+    }
+    const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 120 : 1);
+    const nextSpan = Math.max(minimumSpan(), Math.min(fullRange()[1] - fullRange()[0],
+      span * Math.exp(Math.max(-2, Math.min(2, delta / 280)))));
+    const anchor = low + fraction * span;
+    setView(anchor - fraction * nextSpan, anchor + (1 - fraction) * nextSpan, 120);
+  }, {passive: false});
+
+  surface.addEventListener('pointerdown', event => {
+    if (!event.isPrimary || event.button !== 0 || !shown?.trace?.length || drag) return;
+    const {fraction} = plotPoint(event, surface);
+    if (fraction < 0 || fraction > 1) return;
+    clearTimeout(focusTimer);
+    const width = plot.getBoundingClientRect().width - LEFT - RIGHT_MARGIN;
+    const position = LEFT + fraction * width;
+    drag = {id: event.pointerId, fraction, start: position, end: position,
+      range: view, select: event.shiftKey, moved: false};
+    if (!drag.select) surface.classList.add('panning');
+    surface.setPointerCapture(event.pointerId);
+  });
+
+  surface.addEventListener('pointermove', event => {
+    if (!event.isPrimary) return;
+    const {fraction, width} = plotPoint(event, surface);
+    cursor = LEFT + fraction * (plot.getBoundingClientRect().width - LEFT - RIGHT_MARGIN);
+    if (drag?.id === event.pointerId) {
+      const offset = fraction - drag.fraction;
+      drag.moved ||= Math.abs(offset * width) >= 4;
+      if (drag.select) {
+        drag.end = LEFT + limitFraction(fraction) * (plot.getBoundingClientRect().width - LEFT - RIGHT_MARGIN);
+      } else if (drag.moved) {
+        const [low, high] = drag.range ?? fullRange();
+        const shift = -offset * (high - low);
+        showView(low + shift, high + shift);
+        return;
+      }
+    }
     draw();
-    return;
-  }
-  const [low, high] = view ?? fullRange();
-  const hz = px => low + (px - LEFT) / (right - LEFT) * (high - low);
-  setView(hz(Math.min(start, end)), hz(Math.max(start, end)));
-});
-plot.addEventListener('lostpointercapture', () => { drag = null; draw(); });
-plot.addEventListener('pointerleave', () => { cursor = null; draw(); });
+  });
+
+  surface.addEventListener('pointerup', event => {
+    if (drag?.id !== event.pointerId) return;
+    const {range, fraction, select, moved} = drag;
+    drag = null;
+    surface.classList.remove('panning');
+    const point = plotPoint(event, surface);
+    const [low, high] = range ?? fullRange();
+    if (select && Math.abs((point.fraction - fraction) * point.width) >= 8) {
+      const end = limitFraction(point.fraction);
+      const hz = part => low + part * (high - low);
+      setView(hz(Math.min(fraction, end)), hz(Math.max(fraction, end)));
+      return;
+    }
+    if (!select && moved) {
+      const shift = (fraction - point.fraction) * (high - low);
+      setView(low + shift, high + shift);
+      return;
+    }
+    commitView();
+    draw();
+  });
+
+  surface.addEventListener('lostpointercapture', event => {
+    if (drag?.id !== event.pointerId) return;
+    view = drag.range;
+    drag = null;
+    surface.classList.remove('panning');
+    fullSpectrum.disabled = view === null;
+    commitView();
+    draw();
+  });
+  surface.addEventListener('pointerleave', () => { cursor = null; draw(); });
+}
 new ResizeObserver(draw).observe(plot);
 
 function groupPeaks(values, size) {
@@ -532,7 +617,7 @@ async function poll() {
     const frame = await response.json();
     if (!latest && frame.focus) {
       view = frame.focus;
-      reset.disabled = false;
+      fullSpectrum.disabled = false;
     }
     if (frame.number && frame.number !== latest?.number) {
       const detailResponse = await fetch('/api/detail/' + frame.number + (frame.peaks ? '?peaks=1' : ''));

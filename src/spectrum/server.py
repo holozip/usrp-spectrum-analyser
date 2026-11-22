@@ -136,11 +136,17 @@ class Receiver:
         self.stream = self.radio.get_rx_stream(stream_args)
         self.metadata = uhd.types.RXMetadata()
         self.command = uhd.types.StreamCMD(uhd.types.StreamMode.num_done)
-        self.size = FFT_SIZE
-        self.window = np.hanning(self.size)
-        self.window_sum = self.window.sum()
-        self.command.num_samps = self.size * AVERAGES
         self.command.stream_now = True
+        self.size = 0
+        self.set_fft_size(FFT_SIZE)
+
+    def set_fft_size(self, size):
+        if self.size == size:
+            return
+        self.size = size
+        self.window = np.hanning(size)
+        self.window_sum = self.window.sum()
+        self.command.num_samps = size * AVERAGES
         self.samples = np.empty((1, self.command.num_samps), dtype=np.complex64)
 
     def tune(self, center):
@@ -298,7 +304,7 @@ class Sweep:
         if focus is not None:
             peaks = self.recent_peaks.update((low, high), bins, time.perf_counter())
         self.publish(bins, peaks, low, high, first * BINS_PER_OVERVIEW, BINS_PER_OVERVIEW,
-                     seconds=round(time.perf_counter() - started, 2), hops=len(centers))
+                     seconds=round(time.perf_counter() - started, 2), hops=len(centers), focus=focus)
 
     def continuous(self, receiver, focus, plan, gain):
         center, low, high, first, size = plan
@@ -309,7 +315,19 @@ class Sweep:
             radio = receiver
             actual = radio.tune(center)
         full_window = first is None
-        if full_window:
+        span = focus[1] - focus[0]
+        fft_size = 65536 if span <= 500e3 else 32768 if span <= 2e6 else FFT_SIZE
+        native_slice = None
+        if fft_size != FFT_SIZE:
+            # Keep each native FFT bin instead of combining it on the sweep grid.
+            width = radio.rate / fft_size
+            edge = actual - radio.rate / 2 - width / 2
+            start = max(0, int(np.floor((focus[0] - edge) / width)))
+            stop = min(fft_size, int(np.ceil((focus[1] - edge) / width)))
+            native_slice = slice(start, stop)
+            low, high = edge + start * width, edge + stop * width
+            first, size, group = None, stop - start, 1
+        elif full_window:
             # Each sample in fftshift order lies at the center of a display bin.
             low = actual - radio.rate / 2 - radio.rate / (2 * FFT_SIZE)
             high = low + radio.rate
@@ -327,6 +345,7 @@ class Sweep:
         windows = 0
         gaps = 0
         self.recent_peaks = RecentPeaks()
+        radio.set_fft_size(fft_size)
         radio.start_continuous()
         try:
             while self.focus == focus and self.requested_gain == gain:
@@ -334,7 +353,9 @@ class Sweep:
                     gaps += 1
                     continue
                 power = radio.spectrum()
-                if full_window:
+                if native_slice is not None:
+                    bins[:] = 10 * np.log10(np.maximum(1e-16, power[native_slice]))
+                elif full_window:
                     bins[:] = 10 * np.log10(np.maximum(1e-16, power))
                 else:
                     bins.fill(-np.inf)
@@ -344,21 +365,27 @@ class Sweep:
                 windows += 1
                 if now >= next_update:
                     self.publish(bins, peaks, low, high, first, group, seconds=CONTINUOUS_UPDATE_SECONDS,
-                                 hops=1, continuous=True, windows=windows, gaps=gaps)
+                                 hops=1, continuous=True, windows=windows, gaps=gaps, focus=focus,
+                                 fft_size=fft_size, full_window=full_window)
                     self.cache_detail()
                     next_update = now + CONTINUOUS_UPDATE_SECONDS
         finally:
-            radio.stop_continuous()
+            try:
+                radio.stop_continuous()
+            finally:
+                radio.set_fft_size(FFT_SIZE)
 
-    def publish(self, bins, peaks, low, high, first, group, seconds, hops, continuous=False, windows=0, gaps=0):
+    def publish(self, bins, peaks, low, high, first, group, seconds, hops,
+                continuous=False, windows=0, gaps=0, focus=None, fft_size=FFT_SIZE, full_window=False):
         overview = bins.reshape(-1, group).max(axis=1)
         trace = [round(float(value), 1) if np.isfinite(value) else None for value in overview]
         self.snapshot = dict(self.snapshot, trace=trace, number=self.snapshot["number"] + 1, progress=1, error=None,
-                             gain=getattr(self, "capture_gain", None),
+                             gain=getattr(self, "capture_gain", None), capture_focus=focus,
                              low=low, high=high, detail_offset=first, detail_count=len(bins),
                              detail=bins.astype("<f4", copy=False).tobytes(),
                              peak_detail=peaks.astype("<f4", copy=False).tobytes() if peaks is not None else b"",
-                             seconds=seconds, hops=hops, continuous=continuous, windows=windows, gaps=gaps)
+                             seconds=seconds, hops=hops, continuous=continuous, windows=windows, gaps=gaps,
+                             fft_size=fft_size, full_window=full_window)
 
     def cache_detail(self):
         self.recent_details.append((self.snapshot["number"], self.snapshot["detail"], self.snapshot["peak_detail"]))
