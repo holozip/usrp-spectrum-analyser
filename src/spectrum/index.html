@@ -8,18 +8,15 @@
 body { margin: 0; }
 main { max-width: 1320px; margin: auto; padding: clamp(16px, 4vw, 56px); }
 header, .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
-h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: -.045em; }
 p { color: #a7babd; margin: 5px 0 0; }
 #gain-control[hidden], #gain-stages[hidden], .capture-tools button[hidden] { display: none; }
 #gain-control { display: flex; align-items: center; gap: 8px; padding: 0 8px; }
 #gain-control input { width: 110px; accent-color: #66dec5; }
 #gain-control output { min-width: 3.4em; font-variant-numeric: tabular-nums; }
-.gain-settings { align-self: center; }
 #gain-stages { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 3px 8px 0; color: #a7babd; font-size: .78rem; }
 #gain-stages span { white-space: nowrap; }
 #gain-stages output { color: #ecf4f3; font-variant-numeric: tabular-nums; }
 
-.controls { display: flex; flex-wrap: wrap; gap: 8px; }
 button:disabled { opacity: .55; cursor: default; }
 button { font: inherit; color: inherit; background: #243136; border: 1px solid #53676b; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
 section { margin-top: 24px; border: 1px solid #35454a; border-radius: 14px; background: #171f23; overflow: hidden; }
@@ -54,26 +51,21 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
 </style>
 <main>
   <header>
-    <div><h1>B210 Spectrum</h1><p>70 MHz – 6 GHz</p></div>
-    <div class="controls">
-      <div class="gain-settings">
-        <label id="gain-control" hidden>RX gain
-          <input id="gain" type="range" min="0" max="76" step="1">
-          <output id="gain-value" for="gain"></output>
-        </label>
-        <div id="gain-stages" hidden aria-label="Unified gain-table stages, nominal gain at 2.3 GHz"
-             title="Stage indices and nominal gains from AD9361 UG-570. Actual gain varies with frequency.">
-          <span>LNA <output for="gain"></output></span>
-          <span>Mixer <output for="gain"></output></span>
-          <span>TIA <output for="gain"></output></span>
-          <span>LPF <output for="gain"></output></span>
-          <span>Nominal at 2.3 GHz</span>
-        </div>
+    <div>
+      <label id="gain-control" hidden>RX gain
+        <input id="gain" type="range" min="0" max="76" step="1">
+        <output id="gain-value" for="gain"></output>
+      </label>
+      <div id="gain-stages" hidden aria-label="Unified gain-table stages, nominal gain at 2.3 GHz"
+           title="Stage indices and nominal gains from AD9361 UG-570. Actual gain varies with frequency.">
+        <span>LNA <output for="gain"></output></span>
+        <span>Mixer <output for="gain"></output></span>
+        <span>TIA <output for="gain"></output></span>
+        <span>LPF <output for="gain"></output></span>
+        <span>Nominal at 2.3 GHz</span>
       </div>
-      <button id="tuning-window" type="button" disabled>56 MHz window</button>
-      <button id="zoom-in" type="button" disabled>Zoom in</button>
-      <button id="full-spectrum" type="button" disabled>Full spectrum</button>
     </div>
+    <button id="full-spectrum" type="button" disabled>Full spectrum</button>
   </header>
   <section aria-label="Spectrum plot">
     <div class="bar"><span id="state" role="status">Connecting</span><span id="peak-key" hidden>Recent peaks</span><span id="reading">Power · dBFS</span></div>
@@ -136,8 +128,6 @@ const detail = document.querySelector('#detail');
 const freeze = document.querySelector('#freeze');
 const freezeLabel = document.querySelector('#freeze-label');
 const captureTools = document.querySelector('#capture-tools');
-const zoomIn = document.querySelector('#zoom-in');
-const tuningWindow = document.querySelector('#tuning-window');
 const fullSpectrum = document.querySelector('#full-spectrum');
 const gainControl = document.querySelector('#gain-control');
 const gainSlider = document.querySelector('#gain');
@@ -287,8 +277,6 @@ function draw() {
     ctx.fillText(power, left - 9, y(power) + 4);
   }
   const divisions = width < 540 ? 2 : 4;
-  tuningWindow.disabled = !values.length;
-  zoomIn.disabled = !values.length || high - low <= minimumSpan() + 1;
   const ticks = view ? Array.from({length: divisions + 1}, (_, index) =>
     low + index * (high - low) / divisions
   ) : width < 540 ? [low, 2e9, 4e9, high] : [low, 1e9, 2e9, 3e9, 4e9, 5e9, high];
@@ -387,16 +375,6 @@ freeze.addEventListener('click', () => {
   freezeLabel.textContent = frozen ? 'Resume' : 'Freeze';
   freeze.setAttribute('aria-pressed', frozen);
   render();
-});
-tuningWindow.addEventListener('click', () => {
-  const [low, high] = view ?? fullRange();
-  const center = (low + high) / 2;
-  setView(center - 28e6, center + 28e6);
-});
-zoomIn.addEventListener('click', () => {
-  const [low, high] = view ?? fullRange();
-  const quarter = (high - low) / 4;
-  setView(low + quarter, high - quarter);
 });
 fullSpectrum.addEventListener('click', () => setView(...fullRange()));
 
