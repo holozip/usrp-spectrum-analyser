@@ -22,7 +22,7 @@ The build stages the project under `build/firmware/project/` and writes a raw UH
 
 The host prepares Fast Lock profiles with UHD when it opens the radio. On a full sweep, UHD tunes and calibrates at the first hop and at the 1.3, 2.2, and 4 GHz receiver transitions. For intervening hops, the FPGA programs and verifies the inactive Fast Lock slot, recalls it over SPI, and checks PLL lock. The host requests each hop, receives IQ, computes the FFTs, and stitches the trace.
 
-Unified gain-table mode substitutes the FPGA ROM bytes in UHD’s AD9361 gain-table load sequence. UHD still sets the row address, clocks the writes, and calibrates. The host crosses a table boundary before preparing profiles so the unified table is present on the first capture. The override is opt-in and clears on FPGA or codec reset. The ROM reproduces the UHD 4.11 `gain_table_1300mhz_to_4000mhz` table (Ettus Research, GPL-3.0-or-later) and supplies the dashboard’s gain-stage readout.
+Unified gain-table mode substitutes the FPGA ROM bytes in UHD’s AD9361 gain-table load sequence. UHD still sets the row address, clocks the writes, and calibrates. The host crosses a table boundary before preparing profiles so the unified table is present on the first capture. To skip repeat gain-table writes, build the current source and pass `--fpga-band-sweep build/firmware/usrp_b210_fpga.bin`. With that image, the FPGA skips subsequent table writes after the first complete load. UHD still sends its usual control commands. The override and cached-table state clear on FPGA or codec reset. The ROM reproduces the UHD 4.11 `gain_table_1300mhz_to_4000mhz` table (Ettus Research, GPL-3.0-or-later) and supplies the dashboard’s gain-stage readout.
 
 For RF DC calibration, the optional FPGA poller watches the AD9361 busy bit after UHD starts calibration. It releases the host SPI path when calibration completes or after a 50 ms timeout. FPGA reset leaves polling disabled. The bundled candidate also passed ordinary single-channel UHD RX at 56 MS/s. TX, dual-channel RX, and external clocking on this candidate remain unverified.
 
@@ -43,7 +43,7 @@ Band-only calibration shifted six terminated-input peaks by at most 0.38 dB, wit
 
 The paired-plan figures are medians of six live antenna passes per plan. Its centers alternate 19 and 38 MHz spacing. Both plans calibrated four times per sweep. With identical input captures, all 29 repeatable weak peaks within 600 kHz of wider joins remained detectable. Separate live passes retained 12 of 14 such peaks in at least five of six passes. A controlled weak tone remains untested.
 
-With stock UHD and FPGA unified mode, all 77 gain-table rows read back correctly at 900 MHz and 4.5 GHz. The 208-hop sweep took a median 1.16 s over six passes, with four band calibrations per pass. Stock gain-table mode remained available on the same image.
+With stock UHD and FPGA unified mode, all 77 gain-table rows read back correctly at 900 MHz and 4.5 GHz. The 208-hop sweep took a median 1.16 s over six passes, with four band calibrations per pass. Stock gain-table mode remained available on the same image. Suppressing repeat loads removed 1,926 AD9361 SPI writes per sweep. Over eight steady passes per image, medians were 1.159 s before and 1.158 s after. Stock UHD still sends the control commands.
 
 A full 56 MHz continuous window sustained about 426 FFT averages per second over 12 seconds with no reported receive gaps, using a 512-frame USB receive queue.
 

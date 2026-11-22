@@ -10,7 +10,8 @@ module rx_retune_tb;
    reg codec_reset = 0;
    reg codec_write = 0;
    reg [31:0] host_word = 0;
-   wire unified_gain;
+   wire unified_gain, skip_write;
+   wire [15:0] skipped_writes;
    wire [31:0] rewritten_word;
    wire busy;
    wire command_ready, spi_ready, strobe, result_valid;
@@ -21,7 +22,8 @@ module rx_retune_tb;
 
    rx_retune #(.CAL_TIMEOUT_CYCLES(24'd5000)) dut
      (.clk(clk), .reset(reset), .calibration_start(calibration_start),
-      .codec_reset(codec_reset), .unified_gain(unified_gain), .command(command), .command_valid(command_valid),
+      .codec_reset(codec_reset), .unified_gain(unified_gain),
+      .skipped_gain_writes(skipped_writes), .command(command), .command_valid(command_valid),
       .command_ready(command_ready), .spi_ready(spi_ready), .spi_readback(readback[7:0]),
       .busy(busy), .spi_strobe(strobe), .spi_address(address), .spi_data(data),
       .result(result), .result_valid(result_valid), .result_ready(1'b1));
@@ -33,17 +35,18 @@ module rx_retune_tb;
       .mosi(), .miso(miso), .debug());
 
    unified_rx_gain gain_table
-     (.clk(clk), .reset(reset), .enabled(unified_gain), .codec_write(codec_write),
-      .host_word(host_word), .spi_word(rewritten_word));
+     (.clk(clk), .reset(reset || codec_reset), .enabled(unified_gain), .codec_write(codec_write),
+      .host_word(host_word), .spi_word(rewritten_word),
+      .skip_write(skip_write), .skipped_writes(skipped_writes));
 
-   task codec_word(input [31:0] original_word, input [31:0] expected_word);
+   task codec_word(input [31:0] original_word, input [31:0] expected_word, input expected_skip = 0);
       begin
          @(negedge clk);
          codec_write = 1;
          host_word = original_word;
          #1;
-         if (rewritten_word !== expected_word)
-           $fatal(1, "unexpected codec SPI word: %h, wanted %h", rewritten_word, expected_word);
+         if ((!expected_skip && rewritten_word !== expected_word) || skip_write !== expected_skip)
+           $fatal(1, "unexpected codec SPI handling: %h, wanted %h, skip %d", rewritten_word, expected_word, skip_write);
          @(negedge clk);
          codec_write = 0;
       end
@@ -120,6 +123,8 @@ module rx_retune_tb;
       end
    endtask
 
+   integer gain_row;
+   reg [23:0] expected_gain_word;
    initial begin
       repeat (3) @(negedge clk);
       reset = 0;
@@ -147,6 +152,7 @@ module rx_retune_tb;
       run(32'h15400001, 0, 0, 0, 0, 0);
       if (!unified_gain || result[23:16] !== 8'ha5) $fatal(1, "gain mode did not enable");
       if (rewritten_word !== host_word) $fatal(1, "rewrote a non-codec SPI transaction");
+      codec_word(32'h81302300, 32'h81302300);
       codec_word(32'h81310400, 32'h81312400);
       codec_word(32'h81322c00, 32'h81322100);
       codec_word(32'h81330000, 32'h81332000);
@@ -154,13 +160,43 @@ module rx_retune_tb;
       codec_word(32'h01310000, 32'h01310000);
       codec_word(32'h81304d00, 32'h81304d00);
       codec_word(32'h8131ff00, 32'h81310000);
+      // A partial sequence must never make later writes skippable.
+      codec_word(32'h81371a00, 32'h81371a00);
+      codec_word(32'h81305a00, 32'h81305a00);
+      codec_word(32'h81371e00, 32'h81371e00);
+      codec_word(32'h81370000, 32'h81370000);
+      codec_word(32'h81371a00, 32'h81371a00);
+      for (gain_row=0; gain_row<91; gain_row=gain_row+1) begin
+         expected_gain_word = gain_row < 77 ? gain_table.table_words[gain_row] : 24'b0;
+         codec_word(32'h81300000 | (gain_row << 8), 32'h81300000 | (gain_row << 8));
+         codec_word(32'h8131ff00, {16'h8131, expected_gain_word[23:16], 8'b0});
+         codec_word(32'h8132ff00, {16'h8132, expected_gain_word[15:8], 8'b0});
+         codec_word(32'h8133ff00, {16'h8133, expected_gain_word[7:0], 8'b0});
+         codec_word(32'h81371e00, 32'h81371e00);
+         codec_word(32'h81340000, 32'h81340000);
+         codec_word(32'h81340000, 32'h81340000);
+      end
+      codec_word(32'h81371a00, 32'h81371a00);
+      codec_word(32'h81370000, 32'h81370000);
+      codec_word(32'h81371a00, 0, 1);
+      codec_word(32'h81302300, 0, 1);
+      codec_word(32'h81310400, 0, 1);
+      codec_word(32'h81340000, 0, 1);
+      codec_word(32'h81370000, 0, 1);
+      // Readbacks and RX gain writes are independent of a cached table.
+      codec_word(32'h81370a00, 32'h81370a00);
+      codec_word(32'h01340000, 32'h01340000);
+      codec_word(32'h81092300, 32'h81092300);
+      codec_word(32'h81370000, 32'h81370000);
+      run(32'h17500000, 0, 0, 0, 0, 0);
+      if (result[23:0] !== 24'ha60005) $fatal(1, "wrong suppressed SPI count");
       @(negedge clk);
       codec_reset = 1;
       @(negedge clk);
       codec_reset = 0;
       if (unified_gain) $fatal(1, "codec reset did not clear unified mode");
       codec_word(32'h8131ff00, 32'h8131ff00);
-      run(32'h17400000, 0, 0, 0, 0, 0);
+      run(32'h19400000, 0, 0, 0, 0, 0);
       if (unified_gain || result[23:16] !== 8'ha4) $fatal(1, "gain mode did not disable");
       $display("Fast Lock, RF DC polling, and unified gain SPI substitution passed");
       $finish;

@@ -198,7 +198,8 @@ module b200_core
     wire calibration_start = codec_spi_write && set_data[31:8] == 24'h801602;
     wire codec_reset = codec_spi_write && set_data[31:16] == 16'h8000 &&
                        (set_data[15] || set_data[8]);
-    wire unified_gain;
+    wire unified_gain, skip_gain_write;
+    wire [15:0] skipped_gain_writes;
     wire [31:0] codec_spi_data;
 
 
@@ -278,7 +279,8 @@ module b200_core
 
     rx_retune retuner
      (.clk(bus_clk), .reset(bus_rst), .calibration_start(calibration_start),
-      .codec_reset(codec_reset), .unified_gain(unified_gain), .command(retune_request),
+      .codec_reset(codec_reset), .unified_gain(unified_gain),
+      .skipped_gain_writes(skipped_gain_writes), .command(retune_request),
       .command_valid(retune_request_valid && !set_stb), .command_ready(retune_request_ready_internal),
       .spi_ready(spi_ready), .spi_readback(spi_readback[7:0]), .busy(retune_busy),
       .spi_strobe(retune_spi_strobe), .spi_address(retune_spi_address), .spi_data(retune_spi_data),
@@ -286,12 +288,14 @@ module b200_core
     assign retune_request_ready = retune_request_ready_internal && !set_stb;
 
     unified_rx_gain gain_table
-     (.clk(bus_clk), .reset(bus_rst), .enabled(unified_gain), .codec_write(codec_spi_write),
-      .host_word(set_data), .spi_word(codec_spi_data));
+     (.clk(bus_clk), .reset(bus_rst || codec_reset),
+      .enabled(unified_gain), .codec_write(codec_spi_write),
+      .host_word(set_data), .spi_word(codec_spi_data),
+      .skip_write(skip_gain_write), .skipped_writes(skipped_gain_writes));
 
     simple_spi_core #(.BASE(SR_CORE_SPI), .WIDTH(8), .CLK_IDLE(0), .SEN_IDLE(8'hFF)) misc_spi
      (.clock(bus_clk), .reset(bus_rst),
-      .set_stb(retune_busy ? retune_spi_strobe : set_stb),
+      .set_stb(retune_busy ? retune_spi_strobe : (set_stb && !skip_gain_write)),
       .set_addr(retune_busy ? retune_spi_address : set_addr),
       .set_data(retune_busy ? retune_spi_data : codec_spi_data),
       .readback(spi_readback), .ready(spi_ready),

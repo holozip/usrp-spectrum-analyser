@@ -3,7 +3,7 @@ module rx_retune
   #(parameter CAL_TIMEOUT_CYCLES = 24'd5000000)
   (
    input clk, input reset, input calibration_start, input codec_reset,
-   output reg unified_gain,
+   output reg unified_gain, input [15:0] skipped_gain_writes,
    input [31:0] command, input command_valid, output command_ready,
    input spi_ready, input [7:0] spi_readback,
    output busy, output spi_strobe, output [7:0] spi_address, output [31:0] spi_data,
@@ -60,6 +60,9 @@ module rx_retune
               end else if (command[24:20] == 5'h14) begin
                  unified_gain <= command[0];
                  result <= {command[31:25], 1'b0, 7'h52, command[0], 16'b0};
+                 state <= RESULT;
+              end else if (command[24:20] == 5'h15) begin
+                 result <= {command[31:25], 1'b0, 8'ha6, skipped_gain_writes};
                  state <= RESULT;
               end else if (command[24:20] == 5'h11) begin
                  profile[upload_index] <= command[7:0];
@@ -176,18 +179,52 @@ endmodule
 // AD9361 1.3–4 GHz full gain table, using the same rows as UHD.
 module unified_rx_gain (
    input clk, input reset, input enabled, input codec_write,
-   input [31:0] host_word, output reg [31:0] spi_word
+   input [31:0] host_word, output reg [31:0] spi_word,
+   output skip_write, output reg [15:0] skipped_writes
    );
-   reg [6:0] row;
+   reg [6:0] row, next_row;
+   reg loading, resident;
+   wire [15:0] instruction = host_word[31:16];
+   wire [7:0] value = host_word[15:8];
+   // UHD clocks the table, writes rows 0–90, then stops the table clock.
+   wire start_load = instruction == 16'h8137 && value == 8'h1a;
+   wire end_load = instruction == 16'h8137 && value == 0;
+   wire commit_row = instruction == 16'h8137 && value == 8'h1e;
+   wire table_write = (instruction >= 16'h8130 && instruction <= 16'h8134) ||
+                      instruction == 16'h8137;
+   assign skip_write = enabled && codec_write && resident && table_write &&
+                       (loading || start_load);
    reg [23:0] table_words [0:76];
    wire [23:0] gain_word = row < 77 ? table_words[row] : 24'b0;
    initial $readmemh("unified_rx_gain.mem", table_words);
 
-   always @(posedge clk)
-     if (reset)
-       row <= 0;
-     else if (codec_write && host_word[31:16] == 16'h8130)
-       row <= host_word[14:8];
+   always @(posedge clk) begin
+      if (reset || !enabled) begin
+         row <= 0;
+         next_row <= 0;
+         resident <= 0;
+         loading <= 0;
+         skipped_writes <= 0;
+      end else if (codec_write) begin
+         if (skip_write)
+           skipped_writes <= skipped_writes + 1'b1;
+         if (instruction == 16'h8130)
+           row <= value[6:0];
+         if (start_load && !loading) begin
+            loading <= 1;
+            next_row <= 0;
+         end else if (loading && end_load) begin
+            loading <= 0;
+            if (next_row == 91)
+              resident <= 1;
+         end else if (loading && commit_row && !resident) begin
+            if (row == next_row)
+              next_row <= next_row + 1'b1;
+            else
+              next_row <= row == 0 ? 7'd1 : 7'd0;
+         end
+      end
+   end
 
    always @* begin
       spi_word = host_word;
