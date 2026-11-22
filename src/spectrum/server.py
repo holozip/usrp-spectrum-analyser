@@ -13,6 +13,7 @@ from fpga_sweep import BandSweep
 
 LOW, HIGH = 70e6, 6e9
 MAX_RATE = 56
+NARROW_RATE = MAX_RATE * 1e6 / 4
 AVERAGES = 8
 DISPLAY_BINS = 4096
 BINS_PER_OVERVIEW = 384
@@ -26,33 +27,6 @@ UNIFIED_GAIN_ROM = REPO_ROOT / "src/firmware/rtl/control/unified_rx_gain.mem"
 PEAK_BUCKET_SECONDS = 0.2
 CONTINUOUS_UPDATE_SECONDS = 0.04
 DETAIL_WIDTH = (HIGH - LOW) / DETAIL_BINS
-
-
-def clock_spurs(reference_path):
-    """Estimate clock-spur power above the terminated receiver noise floor."""
-    with np.load(reference_path, allow_pickle=False) as archive:
-        sweeps = archive["baseline"]
-    if sweeps.ndim != 2 or len(sweeps) < 3 or sweeps.shape[1] != DETAIL_BINS:
-        raise ValueError("expected at least three full-resolution terminated sweeps")
-    reference = np.median(sweeps, axis=0)
-    bin_width = (HIGH - LOW) / DETAIL_BINS
-    corrections = {}
-    for clock in (40e6, 56e6):
-        for frequency in range(int(clock), int(HIGH), int(clock)):
-            index = int((frequency - LOW) / bin_width)
-            if index < 32 or index >= DETAIL_BINS - 32:
-                continue
-            floor_db = np.median(np.r_[reference[index - 32:index - 6],
-                                       reference[index + 7:index + 33]])
-            window = reference[index - 3:index + 4]
-            peak = int(np.argmax(window))
-            if not np.isfinite(floor_db) or not np.isfinite(window[peak]) or window[peak] < floor_db + 12:
-                continue
-            floor = 10 ** (float(floor_db) / 10)
-            for offset, db in enumerate(window):
-                if np.isfinite(db) and db >= floor_db + 3:
-                    corrections[index + offset - 3] = (10 ** (float(db) / 10) - floor, floor)
-    return [[index, power, floor] for index, (power, floor) in sorted(corrections.items())]
 
 
 def captures(rate, bandwidth, paired=False):
@@ -85,7 +59,7 @@ def scan_range(centers, focus, paired=False):
     if focus is None:
         return LOW, HIGH, 0, DISPLAY_BINS, centers
     start, stop = focus
-    # Align detail bins to the full-sweep grid so the spur reference still applies.
+    # Align focused sweeps to the full-sweep display grid.
     first = max(0, min(DISPLAY_BINS - 1, int(np.floor((start - LOW) / OVERVIEW_WIDTH))))
     end = min(DISPLAY_BINS, max(first + 1, int(np.ceil((stop - LOW) / OVERVIEW_WIDTH))))
     low, high = LOW + first * OVERVIEW_WIDTH, LOW + end * OVERVIEW_WIDTH
@@ -125,8 +99,12 @@ class Receiver:
 
         self.uhd = uhd
         self.radio = uhd.usrp.MultiUSRP(args.device)
+        if args.rate == MAX_RATE:
+            self.radio.set_master_clock_rate(MAX_RATE * 1e6)
         self.radio.set_rx_rate(args.rate * 1e6, 0)
         self.rate = self.radio.get_rx_rate(0)
+        self.stream_rate = self.rate
+        self.master_clock = self.radio.get_master_clock_rate()
         self.radio.set_rx_bandwidth(min(self.rate, MAX_RATE * 1e6), 0)
         self.bandwidth = self.radio.get_rx_bandwidth(0)
         self.radio.set_rx_antenna(args.antenna, 0)
@@ -148,6 +126,15 @@ class Receiver:
         self.window_sum = self.window.sum()
         self.command.num_samps = size * AVERAGES
         self.samples = np.empty((1, self.command.num_samps), dtype=np.complex64)
+
+    def set_stream_rate(self, rate):
+        if self.stream_rate == rate:
+            return
+        self.radio.set_rx_rate(rate, 0)
+        if (self.radio.get_rx_rate(0) != rate or self.radio.get_master_clock_rate() != self.master_clock
+                or self.radio.get_rx_bandwidth(0) != self.bandwidth):
+            raise RuntimeError(f"Could not set {rate / 1e6:g} MS/s at the current master clock and analog bandwidth")
+        self.stream_rate = rate
 
     def tune(self, center):
         self.radio.set_rx_freq(self.uhd.types.TuneRequest(float(center)), 0)
@@ -255,6 +242,9 @@ class Sweep:
                         receiver = Receiver(self.args)
                         applied_request = self.args.gain
                         self.capture_gain = receiver.radio.get_rx_gain(0)
+                        self.capture_rate = receiver.rate
+                        self.capture_bandwidth = receiver.bandwidth
+                        self.master_clock = receiver.master_clock
                         if self.args.fpga_band_sweep:
                             centers, _, _ = captures(receiver.rate, receiver.bandwidth, paired)
                             receiver = BandSweep(receiver, centers,
@@ -275,6 +265,9 @@ class Sweep:
                     self.recent_peaks = RecentPeaks()
                 plan = None if self.args.demo else continuous_plan(focus, receiver.rate, receiver.bandwidth)
                 if plan is None:
+                    if not self.args.demo:
+                        rf = receiver.receiver if isinstance(receiver, BandSweep) else receiver
+                        rf.set_stream_rate(rf.rate)
                     self.scan(receiver, focus, paired)
                     self.cache_detail()
                 else:
@@ -308,20 +301,27 @@ class Sweep:
 
     def continuous(self, receiver, focus, plan, gain):
         center, low, high, first, size = plan
-        if isinstance(receiver, BandSweep):
-            actual = receiver.tune_continuous(center)
-            radio = receiver.receiver
-        else:
-            radio = receiver
-            actual = radio.tune(center)
+        radio = receiver.receiver if isinstance(receiver, BandSweep) else receiver
         full_window = first is None
         span = focus[1] - focus[0]
         fft_size = 65536 if span <= 500e3 else 32768 if span <= 2e6 else FFT_SIZE
+        stream_rate = radio.rate
+        if fft_size != FFT_SIZE and radio.master_clock == MAX_RATE * 1e6:
+            stream_rate = NARROW_RATE
+            # Keep the narrow view off DC and within the decimator's passband.
+            midpoint = (focus[0] + focus[1]) / 2
+            offset = stream_rate / 4
+            center = midpoint - offset if midpoint - offset >= LOW else midpoint + offset
+        radio.set_stream_rate(stream_rate)
+        if isinstance(receiver, BandSweep):
+            actual = receiver.tune_continuous(center)
+        else:
+            actual = radio.tune(center)
         native_slice = None
         if fft_size != FFT_SIZE:
             # Keep each native FFT bin instead of combining it on the sweep grid.
-            width = radio.rate / fft_size
-            edge = actual - radio.rate / 2 - width / 2
+            width = stream_rate / fft_size
+            edge = actual - stream_rate / 2 - width / 2
             start = max(0, int(np.floor((focus[0] - edge) / width)))
             stop = min(fft_size, int(np.ceil((focus[1] - edge) / width)))
             native_slice = slice(start, stop)
@@ -366,7 +366,7 @@ class Sweep:
                 if now >= next_update:
                     self.publish(bins, peaks, low, high, first, group, seconds=CONTINUOUS_UPDATE_SECONDS,
                                  hops=1, continuous=True, windows=windows, gaps=gaps, focus=focus,
-                                 fft_size=fft_size, full_window=full_window)
+                                 fft_size=fft_size, full_window=full_window, stream_rate=stream_rate)
                     self.cache_detail()
                     next_update = now + CONTINUOUS_UPDATE_SECONDS
         finally:
@@ -376,11 +376,15 @@ class Sweep:
                 radio.set_fft_size(FFT_SIZE)
 
     def publish(self, bins, peaks, low, high, first, group, seconds, hops,
-                continuous=False, windows=0, gaps=0, focus=None, fft_size=FFT_SIZE, full_window=False):
+                continuous=False, windows=0, gaps=0, focus=None, fft_size=FFT_SIZE, full_window=False,
+                stream_rate=None):
         overview = bins.reshape(-1, group).max(axis=1)
         trace = [round(float(value), 1) if np.isfinite(value) else None for value in overview]
         self.snapshot = dict(self.snapshot, trace=trace, number=self.snapshot["number"] + 1, progress=1, error=None,
                              gain=getattr(self, "capture_gain", None), capture_focus=focus,
+                             rate_hz=stream_rate if stream_rate is not None else getattr(self, "capture_rate", None),
+                             bandwidth_hz=getattr(self, "capture_bandwidth", None),
+                             master_clock_hz=getattr(self, "master_clock", None),
                              low=low, high=high, detail_offset=first, detail_count=len(bins),
                              detail=bins.astype("<f4", copy=False).tobytes(),
                              peak_detail=peaks.astype("<f4", copy=False).tobytes() if peaks is not None else b"",
@@ -398,10 +402,6 @@ def main():
     parser.add_argument("--rate", type=float, default=MAX_RATE, help="receive rate in MS/s (default: %(default)s)")
     parser.add_argument("--gain", type=float, default=35, help="receive gain in dB")
     parser.add_argument("--antenna", choices=["RX2", "TX/RX"], default="RX2")
-    parser.add_argument("--spur-reference", type=Path,
-                        help="terminated 56 MS/s reference archive for optional display suppression")
-    parser.add_argument("--spur-strength", type=float, default=1.0,
-                        help="fraction of reference spur power to subtract (default: %(default)s)")
     parser.add_argument("--fpga-band-sweep", nargs="?", type=Path, const=BUNDLED_RETUNE_IMAGE,
                         help="enable Fast Lock with the bundled image or an explicit image path")
     parser.add_argument("--hop-plan", choices=["uniform", "paired"], default="paired",
@@ -434,18 +434,6 @@ def main():
         gain_stages = [[(word >> 21) & 3, (word >> 16) & 31, (word >> 13) & 1, (word >> 8) & 31]
                        for word in words]
 
-    if not 0 < args.spur_strength <= 1:
-        parser.error("--spur-strength must be greater than 0 and at most 1")
-    if args.spur_reference and args.rate != MAX_RATE:
-        parser.error("--spur-reference requires a 56 MS/s sweep")
-    try:
-        corrections = clock_spurs(args.spur_reference) if args.spur_reference else []
-    except (OSError, ValueError, KeyError, EOFError) as error:
-        parser.error(f"invalid spur reference: {error}")
-    spur_data = json.dumps(
-        [[index, spur * args.spur_strength, floor] for index, spur, floor in corrections],
-        allow_nan=False,
-    ).encode()
     gain_stage_data = json.dumps(gain_stages).encode()
     page = PAGE.read_bytes()
 
@@ -458,14 +446,11 @@ def main():
                 frame = {key: value for key, value in snapshot.items() if key not in ("detail", "peak_detail")}
                 frame["gain_table"] = args.gain_table
                 frame["requested_gain"] = None if args.demo else sweep.requested_gain
-                frame["spur_reference_gain"] = args.gain
                 frame["focus"] = sweep.focus
                 frame["peaks"] = bool(snapshot["peak_detail"])
                 kind, body = "application/json", json.dumps(frame, allow_nan=False).encode()
             elif self.path == "/api/gain-stages":
                 kind, body = "application/json", gain_stage_data
-            elif self.path == "/api/spurs":
-                kind, body = "application/json", spur_data
             elif self.path.startswith("/api/detail/"):
                 path, _, query = self.path.partition("?")
                 frame = sweep.snapshot

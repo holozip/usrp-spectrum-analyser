@@ -10,9 +10,7 @@ main { max-width: 1320px; margin: auto; padding: clamp(16px, 4vw, 56px); }
 header, .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
 h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: -.045em; }
 p { color: #a7babd; margin: 5px 0 0; }
-#gain-control[hidden], #gain-stages[hidden], #spur-control[hidden] { display: none; }
-#spur-control, #peak-control { align-self: center; }
-#spur-status { color: #a7babd; font-size: .78rem; }
+#gain-control[hidden], #gain-stages[hidden], .capture-tools button[hidden] { display: none; }
 #gain-control { display: flex; align-items: center; gap: 8px; padding: 0 8px; }
 #gain-control input { width: 110px; accent-color: #66dec5; }
 #gain-control output { min-width: 3.4em; font-variant-numeric: tabular-nums; }
@@ -28,6 +26,19 @@ section { margin-top: 24px; border: 1px solid #35454a; border-radius: 14px; back
 .bar { padding: 14px 18px; border-bottom: 1px solid #35454a; font-size: .92rem; }
 #peak-key { color: #f6b76b; }
 #state { color: #79e4ce; font-weight: 600; }
+#capture-window { position: relative; }
+.capture-tools { position: absolute; z-index: 1; top: 8px; right: 20px; display: flex;
+  align-items: center; flex-wrap: wrap; justify-content: flex-end; max-width: calc(100% - 40px);
+  gap: 3px; padding: 4px; border: 1px solid #35454a; border-radius: 10px; background: #101519f5; }
+.capture-tools button { display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  min-height: 34px; padding: 4px 7px; color: #a7babd; background: transparent; border: 1px solid transparent;
+  border-radius: 6px; white-space: nowrap; font-size: .78rem; }
+.capture-tools button:hover { background: #243136; color: #ecf4f3; }
+.capture-tools button:focus-visible { outline: 2px solid #79e4ce; outline-offset: 1px; }
+.capture-tools button[aria-pressed="true"] { color: #79e4ce; background: #203d3b; border-color: #38605d; }
+.capture-tools svg { flex: none; width: 17px; height: 17px; fill: none; stroke: currentColor;
+  stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+#freeze[aria-pressed="false"] .resume-icon, #freeze[aria-pressed="true"] .freeze-icon { display: none; }
 #plot { cursor: grab; touch-action: pan-y; display: block; width: 100%; height: clamp(300px, 57vh, 650px); }
 #waterfall-panel { margin: 0 20px 16px 58px; }
 #waterfall-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-bottom: 6px; color: #a7babd; font-size: .82rem; }
@@ -62,18 +73,27 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
       <button id="tuning-window" type="button" disabled>56 MHz window</button>
       <button id="zoom-in" type="button" disabled>Zoom in</button>
       <button id="full-spectrum" type="button" disabled>Full spectrum</button>
-      <label id="spur-control" hidden>
-        <input id="suppress-spurs" type="checkbox" checked aria-describedby="spur-status"> Suppress clock spurs
-        <span id="spur-status" hidden></span>
-      </label>
-      <label id="peak-control"><input id="peak-hold" type="checkbox" checked> Peak hold</label>
-      <button id="freeze" type="button" aria-pressed="false">Freeze trace</button>
     </div>
   </header>
   <section aria-label="Spectrum plot">
     <div class="bar"><span id="state" role="status">Connecting</span><span id="peak-key" hidden>Recent peaks</span><span id="reading">Power · dBFS</span></div>
     <progress id="progress" max="1" value="0" aria-label="Current sweep progress"></progress>
-    <canvas id="plot" role="img" aria-label="Received power in dBFS across 70 MHz to 6 GHz"></canvas>
+    <div id="capture-window">
+      <div class="capture-tools" id="capture-tools" role="group" aria-label="Capture tools">
+        <button id="peak-hold" type="button" aria-pressed="true" aria-label="Peak hold" title="Peak hold">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 19h18M4 16l4-3 4-4 3 4 5-3M10 5h5"/>
+          </svg>
+          <span>Peak hold</span>
+        </button>
+        <button id="freeze" type="button" aria-pressed="false" aria-label="Freeze trace" title="Freeze trace">
+          <svg class="freeze-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5v14m6-14v14"/></svg>
+          <svg class="resume-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l10 7-10 7z"/></svg>
+          <span id="freeze-label">Freeze</span>
+        </button>
+      </div>
+      <canvas id="plot" role="img" aria-label="Received power in dBFS across 70 MHz to 6 GHz"></canvas>
+    </div>
     <div id="waterfall-panel">
       <div id="waterfall-label">
         <span>Waterfall · newest at top</span>
@@ -114,19 +134,18 @@ const peakKey = document.querySelector('#peak-key');
 const peakHold = document.querySelector('#peak-hold');
 const detail = document.querySelector('#detail');
 const freeze = document.querySelector('#freeze');
+const freezeLabel = document.querySelector('#freeze-label');
+const captureTools = document.querySelector('#capture-tools');
 const zoomIn = document.querySelector('#zoom-in');
 const tuningWindow = document.querySelector('#tuning-window');
 const fullSpectrum = document.querySelector('#full-spectrum');
-const suppressSpurs = document.querySelector('#suppress-spurs');
 const gainControl = document.querySelector('#gain-control');
 const gainSlider = document.querySelector('#gain');
 const gainValue = document.querySelector('#gain-value');
 const stageReadout = document.querySelector('#gain-stages');
 const stageValues = stageReadout.querySelectorAll('output');
 let gainStages = [];
-const spurControl = document.querySelector('#spur-control');
-const spurStatus = document.querySelector('#spur-status');
-let spurCorrections = [], focusError = null, gainError = null;
+let focusError = null, gainError = null;
 let previewingGain = false, pendingGain = null;
 let focusTimer, queuedFocus, sendingFocus = false;
 const LEFT = 58, RIGHT_MARGIN = 20;
@@ -193,9 +212,9 @@ function setView(low, high, delay = 0) {
   commitView(delay);
 }
 
-function drawWaterfall(values, low, high, dataLow, dataHigh, corrected) {
+function drawWaterfall(values, low, high, dataLow, dataHigh) {
   if (!shown?.number || !values.length) return;
-  const key = [low, high, dataLow, dataHigh, shown.gain, corrected].join('/');
+  const key = [low, high, dataLow, dataHigh, shown.gain].join('/');
   const {width, height} = waterfall;
   if (key !== waterfallKey || shown.number < waterfallFrame) {
     waterfallCtx.clearRect(0, 0, width, height);
@@ -233,7 +252,8 @@ function draw() {
   plot.width = Math.round(width * scale);
   plot.height = Math.round(height * scale);
   ctx.scale(scale, scale);
-  const left = LEFT, right = width - RIGHT_MARGIN, top = 24, bottom = height - 34;
+  const left = LEFT, right = width - RIGHT_MARGIN, bottom = height - 34;
+  const top = captureTools.offsetTop + captureTools.offsetHeight + 5;
   if (right <= left) return;
   const [fullLow, fullHigh] = fullRange();
   const [low, high] = view ?? [fullLow, fullHigh];
@@ -242,11 +262,10 @@ function draw() {
   const dataSpan = dataHigh - dataLow;
   const span = high - low;
   const fineLabels = span < 20e6;
-  const filtered = suppressSpurs.checked && spurCorrections.length && shown?.levels && spurReferenceMatches(shown) ? filteredTrace(shown) : shown;
-  const level = view ? filtered?.levels?.findIndex(values => values.length * span / dataSpan <= 4096) : -1;
-  const values = level >= 0 ? filtered.levels[level] : (filtered?.trace || []);
-  drawWaterfall(values, low, high, dataLow, dataHigh, filtered !== shown);
-  const peaks = peakHold.checked && level >= 0 ? filtered.peakLevels?.[level] : null;
+  const level = view ? shown?.levels?.findIndex(values => values.length * span / dataSpan <= 4096) : -1;
+  const values = level >= 0 ? shown.levels[level] : (shown?.trace || []);
+  drawWaterfall(values, low, high, dataLow, dataHigh);
+  const peaks = toolActive(peakHold) && level >= 0 ? shown.peakLevels?.[level] : null;
   peakKey.hidden = !peaks;
   const binWidth = dataSpan / values.length;
   const first = Math.max(0, Math.floor((low - dataLow) / binWidth) - 1);
@@ -322,18 +341,8 @@ function draw() {
   }
 }
 
-function spurReferenceMatches(frame) {
-  return frame?.gain != null && frame.gain === frame.spur_reference_gain && frame.fft_size === 16384;
-}
-
-function updateSpurControl() {
-  spurControl.hidden = !spurCorrections.length;
-  spurStatus.hidden = !suppressSpurs.checked || spurReferenceMatches(shown);
-  if (!spurStatus.hidden) {
-    spurStatus.textContent = shown?.fft_size > 16384
-      ? 'Paused · reference uses 16k FFT'
-      : 'Paused · reference at ' + latest.spur_reference_gain + ' dB';
-  }
+function toolActive(button) {
+  return button.getAttribute('aria-pressed') === 'true';
 }
 
 function render() {
@@ -352,13 +361,12 @@ function render() {
     gainValue.value = latest.requested_gain + ' dB';
   }
   showGainStages();
-  updateSpurControl();
   const focused = shown && (shown.low > fullRange()[0] || shown.high < fullRange()[1]);
   const sweep = shown?.number ? (focused ? 'Focused sweep' : 'Full sweep') + ' · '
     + shown.hops + ' hops · ' + shown.seconds + ' s per pass' : 'Waiting for the first sweep';
   const capture = shown?.continuous
     ? (shown.full_window ? 'Full 56 MHz window · DC and filter edges visible' : 'Fixed tuning')
-      + ' · 56 MS/s · ' + shown.fft_size.toLocaleString() + '-point FFT · 8 averages' + (shown.gaps ? ' · RX gaps ' + shown.gaps : '')
+      + ' · ' + (shown.rate_hz / 1e6) + ' MS/s · ' + shown.fft_size.toLocaleString() + '-point FFT · 8 averages' + (shown.gaps ? ' · RX gaps ' + shown.gaps : '')
     : sweep;
   const gainPending = pendingGain !== null || (!latest.demo && latest.gain != null
     && latest.gain !== Math.trunc(latest.requested_gain));
@@ -368,11 +376,15 @@ function render() {
   if (changed) draw();
 }
 
-peakHold.addEventListener('change', draw);
+peakHold.addEventListener('click', () => {
+  peakHold.setAttribute('aria-pressed', !toolActive(peakHold));
+  draw();
+});
 
 freeze.addEventListener('click', () => {
   frozen = !frozen;
-  freeze.textContent = frozen ? 'Resume trace' : 'Freeze trace';
+  freeze.title = frozen ? 'Resume trace' : 'Freeze trace';
+  freezeLabel.textContent = frozen ? 'Resume' : 'Freeze';
   freeze.setAttribute('aria-pressed', frozen);
   render();
 });
@@ -505,40 +517,6 @@ function zoomLevels(level) {
   return levels;
 }
 
-function subtractSpurs(values, frame) {
-  const bins = values.slice();
-  const width = (frame.high - frame.low) / bins.length;
-  const [fullLow, fullHigh] = fullRange();
-  const referenceWidth = (fullHigh - fullLow) / (4096 * 384);
-  const corrections = new Map();
-  for (const [absoluteIndex, spur, floor] of spurCorrections) {
-    const frequency = fullLow + (absoluteIndex + 0.5) * referenceWidth;
-    const index = frame.detail_offset === null
-      ? Math.floor((frequency - frame.low) / width)
-      : absoluteIndex - (frame.detail_offset ?? 0);
-    if (index < 0 || index >= bins.length) continue;
-    if (!corrections.has(index) || corrections.get(index)[0] < spur) {
-      corrections.set(index, [spur, floor]);
-    }
-  }
-  for (const [index, [spur, floor]] of corrections) {
-    const power = 10 ** (bins[index] / 10);
-    bins[index] = 10 * Math.log10(Math.min(power, Math.max(floor, power - spur)));
-  }
-  return bins;
-}
-
-function filteredTrace(frame) {
-  if (frame.filtered) return frame.filtered;
-  const bins = subtractSpurs(frame.levels[0], frame);
-  frame.filtered = {
-    levels: zoomLevels(bins),
-    peakLevels: frame.peakLevels && zoomLevels(subtractSpurs(frame.peakLevels[0], frame)),
-    trace: groupPeaks(bins, bins.length / frame.trace.length)
-  };
-  return frame.filtered;
-}
-
 function showGainStages() {
   const gain = previewingGain ? Number(gainSlider.value) : pendingGain ?? latest?.requested_gain;
   const values = gainStages[Math.trunc(gain)];
@@ -593,23 +571,6 @@ gainSlider.addEventListener('change', async () => {
   }
 });
 
-suppressSpurs.addEventListener('change', () => {
-  updateSpurControl();
-  draw();
-});
-async function loadSpurReference() {
-  try {
-    const response = await fetch('/api/spurs');
-    if (!response.ok) return;
-    spurCorrections = await response.json();
-    render();
-    draw();
-  } catch {
-    // Raw viewing remains available if the optional reference cannot be loaded.
-  }
-}
-loadSpurReference();
-
 async function poll() {
   try {
     const response = await fetch('/api/sweep');
@@ -630,7 +591,6 @@ async function poll() {
     } else {
       frame.levels = latest?.levels;
       frame.peakLevels = latest?.peakLevels;
-      frame.filtered = latest?.filtered;
     }
     latest = frame;
     render();
