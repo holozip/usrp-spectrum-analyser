@@ -53,7 +53,7 @@ def clock_spurs(reference_path):
     return [[index, power, floor] for index, (power, floor) in sorted(corrections.items())]
 
 
-def captures(rate, bandwidth):
+def captures(rate, bandwidth, paired=False):
     # Keep clear of both filter edges and discard the immediate LO/DC region.
     edge = 0.35 * min(rate, bandwidth)
     size = FFT_SIZE
@@ -64,11 +64,22 @@ def captures(rate, bandwidth):
     margin = edge - rate / size
     # The neighboring hop must cover the entire DC gap, including its far end.
     step = margin - dc_gap
-    count = int(np.ceil((HIGH - LOW - 2 * margin) / step)) + 1
-    return np.linspace(LOW + margin, HIGH - margin, count), offsets, usable
+    span = HIGH - LOW - 2 * margin
+    if paired:
+        # The close neighbor covers each DC gap. Across pairs, keep the
+        # shared passband wider than the FFT spacing and allow for filter roll-off.
+        wide = 2 * (margin - dc_gap)
+        pairs = int(np.ceil((span + wide) / (step + wide)))
+        increments = np.resize([step, wide], 2 * pairs - 1)
+        positions = np.r_[0, np.cumsum(increments)]
+        centers = LOW + margin + positions * (span / positions[-1])
+    else:
+        count = int(np.ceil(span / step)) + 1
+        centers = np.linspace(LOW + margin, HIGH - margin, count)
+    return centers, offsets, usable
 
 
-def scan_range(centers, focus):
+def scan_range(centers, focus, paired=False):
     if focus is None:
         return LOW, HIGH, 0, DISPLAY_BINS, centers
     start, stop = focus
@@ -79,6 +90,10 @@ def scan_range(centers, focus):
     # Bracket the visible span with adjacent centers so they fill one another's DC gaps.
     left = max(0, min(len(centers) - 2, int(centers.searchsorted(low)) - 1))
     right = min(len(centers), max(left + 2, int(centers.searchsorted(high, side="right")) + 1))
+    if paired:
+        # Keep the partner of every retained center even at focused-span edges.
+        left -= left % 2
+        right += right % 2
     return low, high, first, end - first, centers[left:right]
 
 
@@ -220,6 +235,7 @@ class Sweep:
 
     def run(self):
         receiver = None
+        paired = self.args.hop_plan == "paired"
         while True:
             try:
                 if receiver is None:
@@ -228,14 +244,14 @@ class Sweep:
                     else:
                         receiver = Receiver(self.args)
                         if self.args.fpga_band_sweep:
-                            centers, _, _ = captures(receiver.rate, receiver.bandwidth)
+                            centers, _, _ = captures(receiver.rate, receiver.bandwidth, paired)
                             receiver = BandSweep(receiver, centers)
                 focus = self.focus
                 if focus is None and self.recent_peaks.region is not None:
                     self.recent_peaks = RecentPeaks()
                 plan = None if self.args.demo else continuous_plan(focus, receiver.rate, receiver.bandwidth)
                 if plan is None:
-                    self.scan(receiver, focus)
+                    self.scan(receiver, focus, paired)
                     self.cache_detail()
                 else:
                     self.continuous(receiver, focus, plan)
@@ -245,9 +261,9 @@ class Sweep:
                 self.recent_peaks = RecentPeaks()
                 time.sleep(3)
 
-    def scan(self, receiver, focus=None):
-        centers, offsets, usable = captures(receiver.rate, receiver.bandwidth)
-        low, high, first, count, centers = scan_range(centers, focus)
+    def scan(self, receiver, focus=None, paired=False):
+        centers, offsets, usable = captures(receiver.rate, receiver.bandwidth, paired)
+        low, high, first, count, centers = scan_range(centers, focus, paired)
         detail_count = count * BINS_PER_OVERVIEW
         self.snapshot = dict(self.snapshot, progress=0)
         started = time.perf_counter()
@@ -340,6 +356,8 @@ def main():
                         help="terminated 56 MS/s reference archive for optional display suppression")
     parser.add_argument("--fpga-band-sweep", nargs="?", type=Path, const=BUNDLED_RETUNE_IMAGE,
                         help="enable Fast Lock with the bundled image or an explicit image path")
+    parser.add_argument("--hop-plan", choices=["uniform", "paired"], default="paired",
+                        help="sweep center spacing (default: %(default)s)")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
     if not 4 <= args.rate <= MAX_RATE:

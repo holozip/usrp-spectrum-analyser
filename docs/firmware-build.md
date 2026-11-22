@@ -26,17 +26,20 @@ For RF DC calibration, the optional FPGA poller watches the AD9361 busy bit afte
 
 ## Measured performance
 
-Live tests used 56 MS/s, 56 MHz analog bandwidth, and eight 16,384-point FFT blocks per hop. Full passes covered 311 hops and populated all 1,572,864 detail bins.
+Live tests used 56 MS/s, 56 MHz analog bandwidth, and eight 16,384-point FFT blocks per hop. Full passes populated all 1,572,864 detail bins.
 
 | Comparison | Reference | FPGA-assisted |
 | --- | ---: | ---: |
 | Two-hop median retune, including host control | 2.568 ms UHD | 0.139 ms Fast Lock |
 | Full pass, UHD polling vs FPGA calibration polling | 4.270 s | 4.003 s |
 | Full pass, 100 MHz cadence vs band-only calibration | 4.015 s, 52 calibrations | 1.630 s, 4 calibrations |
+| Band-only pass, uniform vs paired centers | 1.615 s, 311 hops | 1.160 s, 208 hops |
 
 The calibration-polling run measured a 46.64 ms median RF DC busy time across 156 events, with no timeouts. Ordinary UHD took 4.834 s per pass in that comparison. Each full-pass timing is the median of three passes and excludes about 3.8 s of one-time profile preparation.
 
 Band-only calibration shifted six terminated-input peaks by at most 0.38 dB, with each peak staying in the same FFT bin. In five interleaved antenna passes per mode, 366 repeatable weak peaks had a median level change of +0.09 dB, and 95% changed by no more than 1.59 dB. Sensitivity to a controlled weak tone and temperature drift remain unmeasured.
+
+The paired-plan figures are medians of six live antenna passes per plan. Its centers alternate 19 and 38 MHz spacing. Both plans calibrated four times per sweep. With identical input captures, all 29 repeatable weak peaks within 600 kHz of wider joins remained detectable. Separate live passes retained 12 of 14 such peaks in at least five of six passes. A controlled weak tone remains untested.
 
 A full 56 MHz continuous window sustained about 426 FFT averages per second over 12 seconds with no reported receive gaps, using a 512-frame USB receive queue.
 

@@ -25,6 +25,7 @@ Vivado is needed only to rebuild the image. To install a system-wide copy, run `
 
 ## Receiver options
 
+- The default paired plan uses 208 hops at 56 MS/s. Use `--hop-plan uniform` to select the 311-hop plan. [Measured performance](docs/firmware-build.md#measured-performance)
 - `--gain DB` sets RX gain (default 35 dB). With the ordinary UHD sweep, try `--rate 40` or `--rate 20` if USB reception is unstable. The FPGA sweep and continuous mode use 56 MS/s.
 - `--device ARGS` overrides the UHD device arguments. The default receive queue uses `num_recv_frames=128`. To use a deeper queue, pass `--device type=b200,product=B210,num_recv_frames=512`.
 - `--spur-reference PATH` enables a display filter based on a terminated 56 MS/s reference. Use an NPZ file with a `baseline` array containing at least three raw full sweeps at the same gain and antenna port. Each row contains the 1,572,864 little-endian float32 dBFS bins from `/api/detail/<sweep-number>`. Turn off **Suppress clock spurs** when checking a signal on a corrected bin.

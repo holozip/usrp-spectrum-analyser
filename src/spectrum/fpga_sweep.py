@@ -9,10 +9,11 @@ B210_RX_BAND_EDGES = (1.3e9, 2.2e9, 4e9)
 class FastLock:
     def __init__(self, radio):
         self.regs = radio.get_user_settings_iface(0)
-        if self.regs is None or self.regs.peek64(8) >> 32 != 0x52584C33:
+        status = self.regs.peek64(8) if self.regs is not None else 0
+        if status >> 32 != 0x52584C33:
             raise RuntimeError("The FPGA image does not provide Fast Lock and RF DC polling")
         self.normal_settings = None
-        self.tag = 0
+        self.tag = (status >> 25) & 0x7F
         if self.read(0x037) & 0xF8 != 0x08:
             raise RuntimeError("FPGA SPI did not identify the AD9361")
 
