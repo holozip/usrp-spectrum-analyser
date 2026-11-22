@@ -39,9 +39,23 @@ section { margin-top: 24px; border: 1px solid #35454a; border-radius: 14px; back
 #plot { cursor: grab; touch-action: pan-y; display: block; width: 100%; height: clamp(300px, 57vh, 650px); }
 #waterfall-panel { margin: 0 20px 16px 58px; }
 #waterfall-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-bottom: 6px; color: #a7babd; font-size: .82rem; }
-.waterfall-scale { display: inline-flex; align-items: center; gap: 6px; }
-.waterfall-scale i { display: inline-block; width: 66px; height: 7px; border-radius: 2px;
+.waterfall-scale { display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.waterfall-range { position: relative; width: clamp(128px, 24vw, 220px); height: 30px; min-width: 0; cursor: pointer; }
+.waterfall-range-track { position: absolute; inset: 8px 9px; overflow: hidden; border-radius: 4px;
+  background: #29383d; pointer-events: none; }
+.waterfall-range-track::before { content: ""; position: absolute;
+  inset: 0 var(--end-space) 0 var(--start-space);
   background: linear-gradient(90deg, #141c2b, #265382, #11a9a4, #f1be61, #fff2d7); }
+.waterfall-range input { appearance: none; position: absolute; inset: 0; margin: 0; width: 100%; height: 100%;
+  background: transparent; pointer-events: none; }
+.waterfall-range input:focus-visible { z-index: 1; outline: 1px solid #79e4ce; outline-offset: 2px; border-radius: 4px; }
+.waterfall-range input::-webkit-slider-thumb { appearance: none; width: 18px; height: 22px;
+  box-sizing: border-box; border: 2px solid #ecf4f3; border-radius: 5px;
+  background: #25363c; cursor: ew-resize; pointer-events: auto; }
+.waterfall-range input::-moz-range-thumb { width: 18px; height: 22px;
+  box-sizing: border-box; border: 2px solid #ecf4f3; border-radius: 5px;
+  background: #25363c; cursor: ew-resize; pointer-events: auto; }
 #waterfall { cursor: grab; touch-action: pan-y; display: block; width: 100%; height: clamp(120px, 22vh, 220px); background: #101519; image-rendering: pixelated; }
 #plot.panning, #waterfall.panning { cursor: grabbing; }
 progress { display: block; width: 100%; height: 5px; border: 0; accent-color: #66dec5; }
@@ -89,7 +103,15 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
     <div id="waterfall-panel">
       <div id="waterfall-label">
         <span>Waterfall · newest at top</span>
-        <span class="waterfall-scale"><span>−115</span><i aria-hidden="true"></i><span>−35 dBFS</span></span>
+        <div class="waterfall-scale" role="group" aria-label="Waterfall color range">
+          <output id="waterfall-low-value" for="waterfall-low" aria-live="off">−115</output>
+          <div class="waterfall-range">
+            <span class="waterfall-range-track" aria-hidden="true"></span>
+            <input id="waterfall-low" type="range" min="-160" max="0" value="-115" aria-label="Waterfall lower level">
+            <input id="waterfall-high" type="range" min="-160" max="0" value="-35" aria-label="Waterfall upper level">
+          </div>
+          <span><output id="waterfall-high-value" for="waterfall-high" aria-live="off">−35</output> dBFS</span>
+        </div>
       </div>
       <canvas id="waterfall" width="1024" height="160" role="img"
               aria-label="History of received power across the frequencies shown in the spectrum plot"></canvas>
@@ -106,6 +128,15 @@ const ctx = plot.getContext('2d');
 const waterfall = document.querySelector('#waterfall');
 const waterfallCtx = waterfall.getContext('2d');
 const waterfallRow = waterfallCtx.createImageData(waterfall.width, 1);
+const waterfallImage = waterfallCtx.createImageData(waterfall.width, waterfall.height);
+const waterfallHistory = Array.from({length: waterfall.height}, () => new Float32Array(waterfall.width));
+let waterfallHead = 0, waterfallLength = 0;
+const waterfallRange = document.querySelector('.waterfall-range');
+const waterfallTrack = document.querySelector('.waterfall-range-track');
+const waterfallLow = document.querySelector('#waterfall-low');
+const waterfallHigh = document.querySelector('#waterfall-high');
+const waterfallLowValue = document.querySelector('#waterfall-low-value');
+const waterfallHighValue = document.querySelector('#waterfall-high-value');
 const paletteCanvas = document.createElement('canvas');
 paletteCanvas.width = 256;
 paletteCanvas.height = 1;
@@ -202,12 +233,71 @@ function setView(low, high, delay = 0) {
   commitView(delay);
 }
 
+function colorWaterfallRow(powers, rgba, offset = 0) {
+  const low = waterfallLow.valueAsNumber;
+  const span = waterfallHigh.valueAsNumber - low;
+  for (let column = 0; column < powers.length; column++) {
+    const power = powers[column];
+    const color = 4 * Math.round(255 * limitFraction((power - low) / span));
+    const pixel = offset + 4 * column;
+    rgba[pixel] = waterfallColors[color];
+    rgba[pixel + 1] = waterfallColors[color + 1];
+    rgba[pixel + 2] = waterfallColors[color + 2];
+    rgba[pixel + 3] = Number.isFinite(power) ? 255 : 0;
+  }
+}
+
+function updateWaterfallRange() {
+  const low = waterfallLow.valueAsNumber, high = waterfallHigh.valueAsNumber;
+  const min = Number(waterfallLow.min), span = Number(waterfallLow.max) - min;
+  waterfallTrack.style.setProperty('--start-space', 100 * (low - min) / span + '%');
+  waterfallTrack.style.setProperty('--end-space', 100 * (1 - (high - min) / span) + '%');
+  const label = value => String(value).replace('-', '−');
+  waterfallLowValue.value = label(low);
+  waterfallHighValue.value = label(high);
+  waterfallLow.setAttribute('aria-valuetext', label(low) + ' dBFS');
+  waterfallHigh.setAttribute('aria-valuetext', label(high) + ' dBFS');
+  waterfallLow.setAttribute('aria-valuemax', high - 1);
+  waterfallHigh.setAttribute('aria-valuemin', low + 1);
+
+  if (!waterfallLength) return;
+  const rgba = waterfallImage.data;
+  const rowBytes = 4 * waterfall.width;
+  for (let row = 0; row < waterfallLength; row++) {
+    colorWaterfallRow(waterfallHistory[(waterfallHead + row) % waterfall.height], rgba, row * rowBytes);
+  }
+  rgba.fill(0, waterfallLength * rowBytes);
+  waterfallCtx.putImageData(waterfallImage, 0, 0);
+}
+
+function setWaterfallLimit(input, value) {
+  input.value = input === waterfallLow ? Math.min(value, waterfallHigh.valueAsNumber - 1)
+    : Math.max(value, waterfallLow.valueAsNumber + 1);
+  updateWaterfallRange();
+}
+
+for (const input of [waterfallLow, waterfallHigh]) {
+  input.addEventListener('input', () => setWaterfallLimit(input, input.valueAsNumber));
+}
+waterfallRange.addEventListener('click', event => {
+  if (event.target !== waterfallRange) return;
+  const track = waterfallTrack.getBoundingClientRect();
+  const min = Number(waterfallLow.min), max = Number(waterfallLow.max);
+  const value = Math.round(min + limitFraction((event.clientX - track.left) / track.width) * (max - min));
+  const input = value < (waterfallLow.valueAsNumber + waterfallHigh.valueAsNumber) / 2
+    ? waterfallLow : waterfallHigh;
+  input.focus();
+  setWaterfallLimit(input, value);
+});
+updateWaterfallRange();
+
 function drawWaterfall(values, low, high, dataLow, dataHigh) {
   if (!shown?.number || !values.length) return;
   const key = [low, high, dataLow, dataHigh, shown.gain].join('/');
   const {width, height} = waterfall;
   if (key !== waterfallKey || shown.number < waterfallFrame) {
     waterfallCtx.clearRect(0, 0, width, height);
+    waterfallLength = 0;
     waterfallKey = key;
     waterfallFrame = undefined;
   }
@@ -215,7 +305,8 @@ function drawWaterfall(values, low, high, dataLow, dataHigh) {
 
   const binsPerHz = values.length / (dataHigh - dataLow);
   const hzPerPixel = (high - low) / width;
-  const rgba = waterfallRow.data;
+  waterfallHead = (waterfallHead + height - 1) % height;
+  const powers = waterfallHistory[waterfallHead];
   for (let column = 0; column < width; column++) {
     const edge = (low + column * hzPerPixel - dataLow) * binsPerHz;
     const first = Math.max(0, Math.floor(edge));
@@ -224,13 +315,10 @@ function drawWaterfall(values, low, high, dataLow, dataHigh) {
     for (let bin = first; bin < last; bin++) {
       if (Number.isFinite(values[bin])) power = Math.max(power, values[bin]);
     }
-    const color = 4 * Math.round(255 * Math.max(0, Math.min(1, (power + 115) / 80)));
-    const pixel = 4 * column;
-    rgba[pixel] = waterfallColors[color];
-    rgba[pixel + 1] = waterfallColors[color + 1];
-    rgba[pixel + 2] = waterfallColors[color + 2];
-    rgba[pixel + 3] = Number.isFinite(power) ? 255 : 0;
+    powers[column] = power;
   }
+  colorWaterfallRow(powers, waterfallRow.data);
+  waterfallLength = Math.min(waterfallLength + 1, height);
   waterfallCtx.drawImage(waterfall, 0, 0, width, height - 1, 0, 1, width, height - 1);
   waterfallCtx.putImageData(waterfallRow, 0, 0);
   waterfallFrame = shown.number;
