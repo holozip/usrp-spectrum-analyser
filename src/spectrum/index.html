@@ -22,6 +22,7 @@ button { font: inherit; color: inherit; background: #243136; border: 1px solid #
 section { margin-top: 24px; border: 1px solid #35454a; border-radius: 14px; background: #171f23; overflow: hidden; }
 .bar { padding: 14px 18px; border-bottom: 1px solid #35454a; font-size: .92rem; }
 #peak-key { color: #f6b76b; }
+#hop-key { color: #c9a8ff; }
 #state { color: #79e4ce; font-weight: 600; }
 #capture-window { position: relative; }
 .capture-tools { position: absolute; z-index: 1; top: 8px; right: 20px; display: flex;
@@ -37,6 +38,8 @@ section { margin-top: 24px; border: 1px solid #35454a; border-radius: 14px; back
   stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 #freeze[aria-pressed="false"] .resume-icon, #freeze[aria-pressed="true"] .freeze-icon { display: none; }
 #plot { cursor: grab; touch-action: pan-y; display: block; width: 100%; height: clamp(300px, 57vh, 650px); }
+#power-axis { position: absolute; left: 0; cursor: ns-resize; touch-action: none; }
+#power-axis.panning { cursor: grabbing; }
 #waterfall-panel { margin: 0 20px 16px 58px; }
 #waterfall-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-bottom: 6px; color: #a7babd; font-size: .82rem; }
 .waterfall-scale { display: inline-flex; align-items: center; gap: 8px; max-width: 100%;
@@ -82,7 +85,12 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
     <button id="full-spectrum" type="button" disabled>Full spectrum</button>
   </header>
   <section aria-label="Spectrum plot">
-    <div class="bar"><span id="state" role="status">Connecting</span><span id="peak-key" hidden>Recent peaks</span><span id="reading">Power · dBFS</span></div>
+    <div class="bar">
+      <span id="state" role="status">Connecting</span>
+      <span id="peak-key" hidden>Recent peaks</span>
+      <span id="hop-key" title="Overlapping hops repeatedly measured different levels here" hidden>Hop disagreement</span>
+      <span id="reading">Power · dBFS</span>
+    </div>
     <progress id="progress" max="1" value="0" aria-label="Current sweep progress"></progress>
     <div id="capture-window">
       <div class="capture-tools" id="capture-tools" role="group" aria-label="Capture tools">
@@ -99,6 +107,7 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
         </button>
       </div>
       <canvas id="plot" role="img" aria-label="Received power in dBFS across 70 MHz to 6 GHz"></canvas>
+      <div id="power-axis" title="dBFS axis · Drag to pan · Scroll to scale · Double-click to reset"></div>
     </div>
     <div id="waterfall-panel">
       <div id="waterfall-label">
@@ -120,11 +129,13 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
   <footer>
     <p id="detail">Each trace combines sequential receiver captures.</p>
     <p>Scroll to zoom · Drag to pan · Shift-drag to select a range</p>
+    <p>dBFS axis · Drag to pan · Scroll to scale · Double-click to reset</p>
   </footer>
 </main>
 <script>
 const plot = document.querySelector('#plot');
 const ctx = plot.getContext('2d');
+const powerAxis = document.querySelector('#power-axis');
 const waterfall = document.querySelector('#waterfall');
 const waterfallCtx = waterfall.getContext('2d');
 const waterfallRow = waterfallCtx.createImageData(waterfall.width, 1);
@@ -154,6 +165,7 @@ const state = document.querySelector('#state');
 const progress = document.querySelector('#progress');
 const reading = document.querySelector('#reading');
 const peakKey = document.querySelector('#peak-key');
+const hopKey = document.querySelector('#hop-key');
 const peakHold = document.querySelector('#peak-hold');
 const detail = document.querySelector('#detail');
 const freeze = document.querySelector('#freeze');
@@ -170,6 +182,10 @@ let focusError = null, gainError = null;
 let previewingGain = false, pendingGain = null;
 let focusTimer, queuedFocus, sendingFocus = false;
 const LEFT = 58, RIGHT_MARGIN = 20;
+const DEFAULT_POWER_LOW = -120, DEFAULT_POWER_SPAN = 120;
+const MIN_POWER = -160, MAX_POWER = 20, MIN_POWER_SPAN = 10;
+let powerLow = DEFAULT_POWER_LOW, powerSpan = DEFAULT_POWER_SPAN, powerDrag = null;
+powerAxis.style.width = LEFT + 'px';
 let latest, shown, frozen = false, cursor = null, view = null, drag = null;
 const frequencyLabel = (hz, fine = false) => hz >= 1e9 && !fine
   ? (hz / 1e9).toFixed(3) + ' GHz'
@@ -332,6 +348,9 @@ function draw() {
   ctx.scale(scale, scale);
   const left = LEFT, right = width - RIGHT_MARGIN, bottom = height - 34;
   const top = captureTools.offsetTop + captureTools.offsetHeight + 5;
+  const plotHeight = Math.max(0, bottom - top);
+  powerAxis.style.top = top + 'px';
+  powerAxis.style.height = plotHeight + 'px';
   if (right <= left) return;
   const [fullLow, fullHigh] = fullRange();
   const [low, high] = view ?? [fullLow, fullHigh];
@@ -349,7 +368,7 @@ function draw() {
   const first = Math.max(0, Math.floor((low - dataLow) / binWidth) - 1);
   const last = Math.min(values.length, Math.ceil((high - dataLow) / binWidth) + 1);
   const x = fraction => left + fraction * (right - left);
-  const y = power => bottom - (power + 120) / 120 * (bottom - top);
+  const y = power => bottom - (power - powerLow) / powerSpan * plotHeight;
   function line(x1, y1, x2, y2, color) {
     ctx.strokeStyle = color;
     ctx.beginPath();
@@ -360,7 +379,10 @@ function draw() {
   ctx.font = '13px system-ui';
   ctx.fillStyle = '#a7babd';
   ctx.textAlign = 'right';
-  for (let power = -120; power <= 0; power += 20) {
+  const idealStep = powerSpan / Math.max(2, plotHeight / 48);
+  const magnitude = 10 ** Math.floor(Math.log10(idealStep));
+  const step = [1, 2, 5, 10].find(factor => factor * magnitude >= idealStep) * magnitude;
+  for (let power = Math.ceil(powerLow / step) * step; power <= powerLow + powerSpan; power += step) {
     line(left, y(power), right, y(power), '#304046');
     ctx.fillText(power, left - 9, y(power) + 4);
   }
@@ -374,6 +396,14 @@ function draw() {
     ctx.textAlign = hz === low ? 'left' : hz === high ? 'right' : 'center';
     const label = view ? frequencyLabel(hz, fineLabels) : hz === low ? '70 MHz' : hz / 1e9 + ' GHz';
     ctx.fillText(label, px, bottom + 22);
+  }
+  const disagreements = (shown?.hop_disagreements ?? []).filter(([start, end]) => start < high && end > low);
+  hopKey.hidden = disagreements.length === 0;
+  ctx.fillStyle = '#c9a8ff';
+  for (const [start, end] of disagreements) {
+    const from = x(limitFraction((start - low) / span));
+    const to = x(limitFraction((end - low) / span));
+    ctx.fillRect(Math.min(from, right - 2), top - 4, Math.max(2, to - from), 3);
   }
   ctx.save();
   ctx.beginPath();
@@ -411,9 +441,11 @@ function draw() {
     const index = Math.min(Math.floor((hz - dataLow) / binWidth), values.length - 1);
     const power = hz >= dataLow && hz <= dataHigh ? values[index] : undefined;
     const readoutHz = Number.isFinite(power) ? dataLow + (index + 0.5) * binWidth : hz;
+    const disagreement = disagreements.some(([start, end]) => hz >= start && hz < end);
     line(cursor, top, cursor, bottom, '#c1d2d5');
     reading.textContent = frequencyLabel(readoutHz, fineLabels)
-      + (Number.isFinite(power) ? ' · ' + power.toFixed(1) + ' dBFS' : ' · No data') + resolution;
+      + (Number.isFinite(power) ? ' · ' + power.toFixed(1) + ' dBFS' : ' · No data') + resolution
+      + (disagreement ? ' · Hop disagreement' : '');
   }
 }
 
@@ -477,6 +509,53 @@ function limitFraction(fraction) {
   return Math.max(0, Math.min(1, fraction));
 }
 
+function wheelZoomFactor(event) {
+  const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 120 : 1);
+  return Math.exp(Math.max(-2, Math.min(2, delta / 280)));
+}
+
+function setPowerView(low, span) {
+  powerLow = Math.max(MIN_POWER, Math.min(low, MAX_POWER - span));
+  powerSpan = span;
+  draw();
+}
+
+powerAxis.addEventListener('pointerenter', () => {
+  if (cursor === null) return;
+  cursor = null;
+  draw();
+});
+
+powerAxis.addEventListener('pointerdown', event => {
+  if (!event.isPrimary || event.button !== 0 || powerDrag) return;
+  powerDrag = {id: event.pointerId, y: event.clientY, low: powerLow};
+  powerAxis.classList.add('panning');
+  powerAxis.setPointerCapture(event.pointerId);
+});
+
+powerAxis.addEventListener('pointermove', event => {
+  if (powerDrag?.id !== event.pointerId) return;
+  const offset = (event.clientY - powerDrag.y) / powerAxis.clientHeight;
+  setPowerView(powerDrag.low + offset * powerSpan, powerSpan);
+});
+
+powerAxis.addEventListener('lostpointercapture', event => {
+  if (powerDrag?.id !== event.pointerId) return;
+  powerDrag = null;
+  powerAxis.classList.remove('panning');
+});
+
+powerAxis.addEventListener('wheel', event => {
+  if (powerDrag || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+  event.preventDefault();
+  const bounds = powerAxis.getBoundingClientRect();
+  const fraction = limitFraction((bounds.bottom - event.clientY) / bounds.height);
+  const span = Math.max(MIN_POWER_SPAN, Math.min(MAX_POWER - MIN_POWER, powerSpan * wheelZoomFactor(event)));
+  setPowerView(powerLow + fraction * (powerSpan - span), span);
+}, {passive: false});
+
+powerAxis.addEventListener('dblclick', () => setPowerView(DEFAULT_POWER_LOW, DEFAULT_POWER_SPAN));
+
 for (const surface of [plot, waterfall]) {
   surface.addEventListener('wheel', event => {
     if (!shown?.trace?.length || drag) return;
@@ -490,9 +569,8 @@ for (const surface of [plot, waterfall]) {
       setView(low + shift, high + shift, 120);
       return;
     }
-    const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 120 : 1);
     const nextSpan = Math.max(minimumSpan(), Math.min(fullRange()[1] - fullRange()[0],
-      span * Math.exp(Math.max(-2, Math.min(2, delta / 280)))));
+      span * wheelZoomFactor(event)));
     const anchor = low + fraction * span;
     setView(anchor - fraction * nextSpan, anchor + (1 - fraction) * nextSpan, 120);
   }, {passive: false});

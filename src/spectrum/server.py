@@ -27,6 +27,9 @@ UNIFIED_GAIN_ROM = REPO_ROOT / "src/firmware/rtl/control/unified_rx_gain.mem"
 PEAK_BUCKET_SECONDS = 0.2
 CONTINUOUS_UPDATE_SECONDS = 0.04
 DETAIL_WIDTH = (HIGH - LOW) / DETAIL_BINS
+HOP_COMPARE_WIDTH = 100e3
+HOP_COMPARE_RATIO = 10 ** (12 / 10)
+HOP_COMPARE_PASSES = 3
 
 
 def captures(rate, bandwidth, paired=False):
@@ -218,6 +221,68 @@ class RecentPeaks:
         return self.current if self.previous is None else np.maximum(self.current, self.previous)
 
 
+class HopDisagreements:
+    def __init__(self, centers, offsets, usable):
+        tile_count = int((HIGH - LOW) / HOP_COMPARE_WIDTH)
+        self.bin_width = offsets[1] - offsets[0]
+        full_tile = int(HOP_COMPARE_WIDTH / self.bin_width)
+        coverage = np.zeros(tile_count, dtype=np.uint8)
+        captures = []
+        for center in centers:
+            frequency = center + offsets
+            bins = np.flatnonzero(usable & (frequency >= LOW) & (frequency < HIGH))
+            tiles = ((frequency[bins] - LOW) / HOP_COMPARE_WIDTH).astype(int)
+            complete = np.bincount(tiles, minlength=tile_count) >= full_tile
+            coverage += complete
+            include = complete[tiles]
+            captures.append((bins[include], tiles[include]))
+
+        # Compare complete slices observed at two distinct tuning centers.
+        self.tiles = np.flatnonzero(coverage == 2)
+        self.hops = []
+        seen = np.zeros(tile_count, dtype=np.uint8)
+        for bins, tiles in captures:
+            include = coverage[tiles] == 2
+            tile, index, count = np.unique(tiles[include], return_inverse=True, return_counts=True)
+            self.hops.append((bins[include], tile, index, count, seen[tile]))
+            seen[tile] += 1
+        self.power = np.empty((2, tile_count))
+        self.direction = np.zeros(self.tiles.size, dtype=np.int8)
+        self.streak = np.zeros_like(self.direction)
+        self.region = None
+
+    def reset(self):
+        self.direction.fill(0)
+        self.streak.fill(0)
+        self.region = None
+
+    def start(self, region):
+        if region != self.region:
+            self.reset()
+            self.region = region
+        self.power.fill(np.nan)
+
+    def record(self, hop, power):
+        bins, tile, index, count, row = self.hops[hop]
+        self.power[row, tile] = np.bincount(index, weights=power[bins]) / count
+
+    def finish(self, low, high):
+        earlier, later = np.maximum(1e-16, self.power[:, self.tiles])
+        direction = (later >= HOP_COMPARE_RATIO * earlier).astype(np.int8)
+        direction -= earlier >= HOP_COMPARE_RATIO * later
+        direction[~(np.isfinite(earlier) & np.isfinite(later))] = 0
+        self.streak = np.where(direction == self.direction, np.minimum(self.streak + 1, HOP_COMPARE_PASSES), 1)
+        self.direction = direction
+        starts = LOW + self.tiles * HOP_COMPARE_WIDTH
+        confirmed = self.tiles[(direction != 0) & (self.streak >= HOP_COMPARE_PASSES)
+                               & (starts < high) & (starts + HOP_COMPARE_WIDTH > low)]
+        if not confirmed.size:
+            return []
+        runs = np.split(confirmed, np.flatnonzero(np.diff(confirmed) > 1) + 1)
+        return [[max(low, LOW + tiles[0] * HOP_COMPARE_WIDTH), min(high, LOW + (tiles[-1] + 1) * HOP_COMPARE_WIDTH)]
+                for tiles in runs]
+
+
 class Sweep:
     def __init__(self, args):
         self.args = args
@@ -226,6 +291,7 @@ class Sweep:
         self.capture_gain = None
         self.recent_details = deque(maxlen=4)
         self.recent_peaks = RecentPeaks()
+        self.hop_comparison = None
         self.snapshot = dict(demo=args.demo, fpga=bool(args.fpga_band_sweep), trace=[], number=0, progress=0, error=None,
                              low=LOW, high=HIGH, seconds=None, detail=b"", peak_detail=b"")
         threading.Thread(target=self.run, daemon=True).start()
@@ -271,16 +337,26 @@ class Sweep:
                     self.scan(receiver, focus, paired)
                     self.cache_detail()
                 else:
+                    if self.hop_comparison is not None:
+                        self.hop_comparison.reset()
                     self.continuous(receiver, focus, plan, gain)
             except Exception as error:
                 self.snapshot = dict(self.snapshot, error=str(error), progress=0)
                 receiver = None
                 self.recent_peaks = RecentPeaks()
+                self.hop_comparison = None
                 time.sleep(3)
 
     def scan(self, receiver, focus=None, paired=False):
-        centers, offsets, usable = captures(receiver.rate, receiver.bandwidth, paired)
-        low, high, first, count, centers = scan_range(centers, focus, paired)
+        all_centers, offsets, usable = captures(receiver.rate, receiver.bandwidth, paired)
+        low, high, first, count, centers = scan_range(all_centers, focus, paired)
+        comparison = None
+        if paired and not isinstance(receiver, Demo):
+            if self.hop_comparison is None:
+                self.hop_comparison = HopDisagreements(all_centers, offsets, usable)
+            comparison = self.hop_comparison
+            comparison.start((focus, self.capture_gain))
+            first_hop = all_centers.searchsorted(centers[0])
         detail_count = count * BINS_PER_OVERVIEW
         self.snapshot = dict(self.snapshot, progress=0)
         started = time.perf_counter()
@@ -290,14 +366,19 @@ class Sweep:
             mask = usable & (frequency >= low) & (frequency <= high) & np.isfinite(power)
             indices = ((frequency[mask] - low) * detail_count / (high - low)).astype(int)
             np.maximum.at(bins, np.minimum(indices, detail_count - 1), power[mask])
+            # Ignore a hop if the radio tunes far enough from the plan to shift its FFT grid.
+            if comparison is not None and abs(frequency[0] - (center + offsets[0])) < comparison.bin_width / 2:
+                comparison.record(first_hop + index, power)
             self.snapshot = dict(self.snapshot, progress=(index + 1) / len(centers), error=None)
         measured = np.isfinite(bins)
         bins[measured] = 10 * np.log10(np.maximum(1e-16, bins[measured]))
         peaks = None
         if focus is not None:
             peaks = self.recent_peaks.update((low, high), bins, time.perf_counter())
+        disagreements = comparison.finish(low, high) if comparison is not None else []
         self.publish(bins, peaks, low, high, first * BINS_PER_OVERVIEW, BINS_PER_OVERVIEW,
-                     seconds=round(time.perf_counter() - started, 2), hops=len(centers), focus=focus)
+                     seconds=round(time.perf_counter() - started, 2), hops=len(centers), focus=focus,
+                     hop_disagreements=disagreements)
 
     def continuous(self, receiver, focus, plan, gain):
         center, low, high, first, size = plan
@@ -377,7 +458,7 @@ class Sweep:
 
     def publish(self, bins, peaks, low, high, first, group, seconds, hops,
                 continuous=False, windows=0, gaps=0, focus=None, fft_size=FFT_SIZE, full_window=False,
-                stream_rate=None):
+                stream_rate=None, hop_disagreements=()):
         overview = bins.reshape(-1, group).max(axis=1)
         trace = [round(float(value), 1) if np.isfinite(value) else None for value in overview]
         self.snapshot = dict(self.snapshot, trace=trace, number=self.snapshot["number"] + 1, progress=1, error=None,
@@ -389,7 +470,7 @@ class Sweep:
                              detail=bins.astype("<f4", copy=False).tobytes(),
                              peak_detail=peaks.astype("<f4", copy=False).tobytes() if peaks is not None else b"",
                              seconds=seconds, hops=hops, continuous=continuous, windows=windows, gaps=gaps,
-                             fft_size=fft_size, full_window=full_window)
+                             fft_size=fft_size, full_window=full_window, hop_disagreements=hop_disagreements)
 
     def cache_detail(self):
         self.recent_details.append((self.snapshot["number"], self.snapshot["detail"], self.snapshot["peak_detail"]))

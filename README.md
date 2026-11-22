@@ -19,9 +19,11 @@ Vivado is needed only to rebuild the image. To install a system-wide copy, run `
 ## Inspect a signal
 
 - Scroll over the spectrum or waterfall to zoom around the pointer. Drag to pan, or hold **Shift** while dragging to select a range. **Full spectrum** returns to 70 MHz–6 GHz.
+- On the left dBFS axis, drag to pan vertically, scroll to scale around the pointer, or double-click to reset to −120 through 0 dBFS.
 - With the default live settings, a span of 56 MHz or less uses continuous capture. Narrow views avoid DC and filter roll-off where possible. The full-width view includes both regions, where power readings can be less reliable.
 - Hover to read frequency, power in dBFS, and the displayed bin width. The plot toolbox contains **Peak hold** and **Freeze trace**. Freezing pauses the display while the receiver keeps collecting samples. Use **Peak hold** to show or hide the amber trace, which retains recent peaks for roughly 200–400 ms. The waterfall shows frequency horizontally and recent sweeps vertically, with the newest row at the top.
 - Drag either handle on the waterfall color scale to adjust its lower or upper dBFS limit. The colors update across the visible history.
+- On paired sweeps, purple **Hop disagreement** markers flag shared 100 kHz slices where the same hop measures at least 12 dB higher for three consecutive passes. Mixer images and intermittent signals can both cause disagreement.
 - The sweep uses 56 MS/s, 56 MHz analog bandwidth, and eight 16,384-point FFT blocks per average by default. FFT spacing is 3.42 kHz. The stitched sweep's finest display bins are 3.77 kHz. Continuous views at 2 MHz or narrower decimate to 14 MS/s and use a 32,768-point FFT (427 Hz spacing). At 500 kHz or narrower, a 65,536-point FFT gives 214 Hz spacing. The master clock and analog bandwidth stay at 56 MHz, with eight FFT blocks per average.
 
 ## Receiver options
