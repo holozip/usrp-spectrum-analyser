@@ -28,7 +28,13 @@ section { margin-top: 24px; border: 1px solid #35454a; border-radius: 14px; back
 .bar { padding: 14px 18px; border-bottom: 1px solid #35454a; font-size: .92rem; }
 #peak-key { color: #f6b76b; }
 #state { color: #79e4ce; font-weight: 600; }
-canvas { cursor: crosshair; touch-action: pan-y; display: block; width: 100%; height: clamp(300px, 57vh, 650px); }
+#plot { cursor: crosshair; touch-action: pan-y; display: block; width: 100%; height: clamp(300px, 57vh, 650px); }
+#waterfall-panel { margin: 0 20px 16px 58px; }
+#waterfall-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-bottom: 6px; color: #a7babd; font-size: .82rem; }
+.waterfall-scale { display: inline-flex; align-items: center; gap: 6px; }
+.waterfall-scale i { display: inline-block; width: 66px; height: 7px; border-radius: 2px;
+  background: linear-gradient(90deg, #141c2b, #265382, #11a9a4, #f1be61, #fff2d7); }
+#waterfall { display: block; width: 100%; height: clamp(120px, 22vh, 220px); background: #101519; image-rendering: pixelated; }
 progress { display: block; width: 100%; height: 5px; border: 0; accent-color: #66dec5; }
 progress::-webkit-progress-bar { background: #26363b; }
 progress::-webkit-progress-value { background: #66dec5; }
@@ -67,6 +73,14 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
     <div class="bar"><span id="state" role="status">Connecting</span><span id="peak-key" hidden>Recent peaks</span><span id="reading">Power · dBFS</span></div>
     <progress id="progress" max="1" value="0" aria-label="Current sweep progress"></progress>
     <canvas id="plot" role="img" aria-label="Received power in dBFS across 70 MHz to 6 GHz"></canvas>
+    <div id="waterfall-panel">
+      <div id="waterfall-label">
+        <span>Waterfall · newest at top</span>
+        <span class="waterfall-scale"><span>−115</span><i aria-hidden="true"></i><span>−35 dBFS</span></span>
+      </div>
+      <canvas id="waterfall" width="1024" height="160" role="img"
+              aria-label="History of received power across the frequencies shown in the spectrum plot"></canvas>
+    </div>
   </section>
   <footer>
     <p id="detail">Each trace combines sequential receiver captures.</p>
@@ -76,6 +90,22 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
 <script>
 const plot = document.querySelector('#plot');
 const ctx = plot.getContext('2d');
+const waterfall = document.querySelector('#waterfall');
+const waterfallCtx = waterfall.getContext('2d');
+const waterfallRow = waterfallCtx.createImageData(waterfall.width, 1);
+const paletteCanvas = document.createElement('canvas');
+paletteCanvas.width = 256;
+paletteCanvas.height = 1;
+const paletteCtx = paletteCanvas.getContext('2d');
+const gradient = paletteCtx.createLinearGradient(0, 0, 256, 0);
+['#141c2b', '#265382', '#11a9a4', '#f1be61', '#fff2d7'].forEach(
+  (color, index, colors) => gradient.addColorStop(index / (colors.length - 1), color)
+);
+paletteCtx.fillStyle = gradient;
+paletteCtx.fillRect(0, 0, 256, 1);
+const waterfallColors = paletteCtx.getImageData(0, 0, 256, 1).data;
+let waterfallKey, waterfallFrame;
+
 const state = document.querySelector('#state');
 const progress = document.querySelector('#progress');
 const reading = document.querySelector('#reading');
@@ -140,6 +170,40 @@ function setView(low, high) {
   draw();
 }
 
+function drawWaterfall(values, low, high, dataLow, dataHigh, corrected) {
+  if (!shown?.number || !values.length) return;
+  const key = [low, high, dataLow, dataHigh, shown.gain, corrected].join('/');
+  const {width, height} = waterfall;
+  if (key !== waterfallKey || shown.number < waterfallFrame) {
+    waterfallCtx.clearRect(0, 0, width, height);
+    waterfallKey = key;
+    waterfallFrame = undefined;
+  }
+  if (frozen || waterfallFrame === shown.number) return;
+
+  const binsPerHz = values.length / (dataHigh - dataLow);
+  const hzPerPixel = (high - low) / width;
+  const rgba = waterfallRow.data;
+  for (let column = 0; column < width; column++) {
+    const edge = (low + column * hzPerPixel - dataLow) * binsPerHz;
+    const first = Math.max(0, Math.floor(edge));
+    const last = Math.min(values.length, Math.ceil(edge + hzPerPixel * binsPerHz));
+    let power = -Infinity;
+    for (let bin = first; bin < last; bin++) {
+      if (Number.isFinite(values[bin])) power = Math.max(power, values[bin]);
+    }
+    const color = 4 * Math.round(255 * Math.max(0, Math.min(1, (power + 115) / 80)));
+    const pixel = 4 * column;
+    rgba[pixel] = waterfallColors[color];
+    rgba[pixel + 1] = waterfallColors[color + 1];
+    rgba[pixel + 2] = waterfallColors[color + 2];
+    rgba[pixel + 3] = Number.isFinite(power) ? 255 : 0;
+  }
+  waterfallCtx.drawImage(waterfall, 0, 0, width, height - 1, 0, 1, width, height - 1);
+  waterfallCtx.putImageData(waterfallRow, 0, 0);
+  waterfallFrame = shown.number;
+}
+
 function draw() {
   const {width, height} = plot.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
@@ -158,6 +222,7 @@ function draw() {
   const filtered = suppressSpurs.checked && spurCorrections.length && shown?.levels && spurReferenceMatches(shown) ? filteredTrace(shown) : shown;
   const level = view ? filtered?.levels?.findIndex(values => values.length * span / dataSpan <= 4096) : -1;
   const values = level >= 0 ? filtered.levels[level] : (filtered?.trace || []);
+  drawWaterfall(values, low, high, dataLow, dataHigh, filtered !== shown);
   const peaks = peakHold.checked && level >= 0 ? filtered.peakLevels?.[level] : null;
   peakKey.hidden = !peaks;
   const binWidth = dataSpan / values.length;
