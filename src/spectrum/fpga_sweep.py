@@ -90,6 +90,10 @@ class FastLock:
         self.write(0x015, self.normal_settings[0])
         self.normal_settings = None
 
+    def enable_unified_gain(self):
+        if self.transact(0x1400001) != 0xA5:
+            raise RuntimeError("This FPGA image does not support the unified gain table")
+
     def calibration_polling(self, enabled):
         self.transact(0x1300000 | int(enabled))
 
@@ -104,12 +108,17 @@ class FastLock:
 
 
 class BandSweep:
-    def __init__(self, receiver, centers):
+    def __init__(self, receiver, centers, unified_gain=False):
         self.receiver = receiver
         self.rate, self.bandwidth = receiver.rate, receiver.bandwidth
         if (self.rate, self.bandwidth) != (56e6, 56e6):
             raise RuntimeError("FPGA sweep requires 56 MS/s and 56 MHz analog bandwidth")
         self.control = FastLock(receiver.radio)
+        if unified_gain:
+            self.control.enable_unified_gain()
+            # The first low-band profile crosses back from the middle UHD table,
+            # forcing a load even if UHD initialized with the low-band table.
+            self.tune(1500e6)
         self.centers = centers
         self.anchors = [0, *centers.searchsorted(B210_RX_BAND_EDGES)]
         self.profiles = []

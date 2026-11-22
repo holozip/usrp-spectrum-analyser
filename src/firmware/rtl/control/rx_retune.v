@@ -2,7 +2,8 @@
 module rx_retune
   #(parameter CAL_TIMEOUT_CYCLES = 24'd5000000)
   (
-   input clk, input reset, input calibration_start,
+   input clk, input reset, input calibration_start, input codec_reset,
+   output reg unified_gain,
    input [31:0] command, input command_valid, output command_ready,
    input spi_ready, input [7:0] spi_readback,
    output busy, output spi_strobe, output [7:0] spi_address, output [31:0] spi_data,
@@ -41,7 +42,9 @@ module rx_retune
          result <= 0;
          uploaded <= 0;
          calibration_polling <= 0;
+         unified_gain <= 0;
       end else begin
+         if (codec_reset) unified_gain <= 0;
          if (busy && state != RESULT)
            cycles <= cycles + 1'b1;
          if (state == CAL_POLL || state == CAL_READ)
@@ -53,6 +56,10 @@ module rx_retune
               if (command[24:20] == 5'h13) begin
                  calibration_polling <= command[0];
                  result <= {command[31:25], 24'b0, command[0]};
+                 state <= RESULT;
+              end else if (command[24:20] == 5'h14) begin
+                 unified_gain <= command[0];
+                 result <= {command[31:25], 1'b0, 7'h52, command[0], 16'b0};
                  state <= RESULT;
               end else if (command[24:20] == 5'h11) begin
                  profile[upload_index] <= command[7:0];
@@ -161,6 +168,35 @@ module rx_retune
            end
            RESULT: if (result_ready) state <= IDLE;
            default: state <= IDLE;
+         endcase
+      end
+   end
+endmodule
+
+// AD9361 1.3–4 GHz full gain table, using the same rows as UHD.
+module unified_rx_gain (
+   input clk, input reset, input enabled, input codec_write,
+   input [31:0] host_word, output reg [31:0] spi_word
+   );
+   reg [6:0] row;
+   reg [23:0] table_words [0:76];
+   wire [23:0] gain_word = row < 77 ? table_words[row] : 24'b0;
+   initial $readmemh("unified_rx_gain.mem", table_words);
+
+   always @(posedge clk)
+     if (reset)
+       row <= 0;
+     else if (codec_write && host_word[31:16] == 16'h8130)
+       row <= host_word[14:8];
+
+   always @* begin
+      spi_word = host_word;
+      if (enabled && codec_write) begin
+         case (host_word[31:16])
+           16'h8131: spi_word[15:8] = gain_word[23:16];
+           16'h8132: spi_word[15:8] = gain_word[15:8];
+           16'h8133: spi_word[15:8] = gain_word[7:0];
+           default: ;
          endcase
       end
    end

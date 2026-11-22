@@ -193,8 +193,13 @@ module b200_core
     wire [31:0] retune_command_r, retune_status_data;
     reg [31:0] retune_status_r, calibration_status_r;
     reg [7:0] codec_spi_select, calibration_count_r;
-    wire calibration_start = set_stb && set_addr == SR_CORE_SPI + 2 &&
-                             codec_spi_select == 8'd1 && set_data[31:8] == 24'h801602;
+    wire codec_spi_write = set_stb && set_addr == SR_CORE_SPI + 2 &&
+                           codec_spi_select == 8'd1;
+    wire calibration_start = codec_spi_write && set_data[31:8] == 24'h801602;
+    wire codec_reset = codec_spi_write && set_data[31:16] == 16'h8000 &&
+                       (set_data[15] || set_data[8]);
+    wire unified_gain;
+    wire [31:0] codec_spi_data;
 
 
     wire [7:0] gpsdo_st;
@@ -272,18 +277,23 @@ module b200_core
       end
 
     rx_retune retuner
-     (.clk(bus_clk), .reset(bus_rst), .calibration_start(calibration_start), .command(retune_request),
+     (.clk(bus_clk), .reset(bus_rst), .calibration_start(calibration_start),
+      .codec_reset(codec_reset), .unified_gain(unified_gain), .command(retune_request),
       .command_valid(retune_request_valid && !set_stb), .command_ready(retune_request_ready_internal),
       .spi_ready(spi_ready), .spi_readback(spi_readback[7:0]), .busy(retune_busy),
       .spi_strobe(retune_spi_strobe), .spi_address(retune_spi_address), .spi_data(retune_spi_data),
       .result(retune_result), .result_valid(retune_result_valid), .result_ready(retune_result_ready));
     assign retune_request_ready = retune_request_ready_internal && !set_stb;
 
+    unified_rx_gain gain_table
+     (.clk(bus_clk), .reset(bus_rst), .enabled(unified_gain), .codec_write(codec_spi_write),
+      .host_word(set_data), .spi_word(codec_spi_data));
+
     simple_spi_core #(.BASE(SR_CORE_SPI), .WIDTH(8), .CLK_IDLE(0), .SEN_IDLE(8'hFF)) misc_spi
      (.clock(bus_clk), .reset(bus_rst),
       .set_stb(retune_busy ? retune_spi_strobe : set_stb),
       .set_addr(retune_busy ? retune_spi_address : set_addr),
-      .set_data(retune_busy ? retune_spi_data : set_data),
+      .set_data(retune_busy ? retune_spi_data : codec_spi_data),
       .readback(spi_readback), .ready(spi_ready),
       .sen(sen), .sclk(sclk), .mosi(mosi), .miso(miso),
       .debug());

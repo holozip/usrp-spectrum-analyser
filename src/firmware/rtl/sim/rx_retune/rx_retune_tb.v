@@ -7,6 +7,11 @@ module rx_retune_tb;
    reg command_valid = 0;
    reg miso = 0;
    reg calibration_start = 0;
+   reg codec_reset = 0;
+   reg codec_write = 0;
+   reg [31:0] host_word = 0;
+   wire unified_gain;
+   wire [31:0] rewritten_word;
    wire busy;
    wire command_ready, spi_ready, strobe, result_valid;
    wire [7:0] address;
@@ -15,7 +20,8 @@ module rx_retune_tb;
    reg [23:0] first_word, last_word;
 
    rx_retune #(.CAL_TIMEOUT_CYCLES(24'd5000)) dut
-     (.clk(clk), .reset(reset), .calibration_start(calibration_start), .command(command), .command_valid(command_valid),
+     (.clk(clk), .reset(reset), .calibration_start(calibration_start),
+      .codec_reset(codec_reset), .unified_gain(unified_gain), .command(command), .command_valid(command_valid),
       .command_ready(command_ready), .spi_ready(spi_ready), .spi_readback(readback[7:0]),
       .busy(busy), .spi_strobe(strobe), .spi_address(address), .spi_data(data),
       .result(result), .result_valid(result_valid), .result_ready(1'b1));
@@ -25,6 +31,23 @@ module rx_retune_tb;
       .set_data(calibration_start ? 32'h80160200 : data),
       .readback(readback), .readback_stb(), .ready(spi_ready), .sen(), .sclk(),
       .mosi(), .miso(miso), .debug());
+
+   unified_rx_gain gain_table
+     (.clk(clk), .reset(reset), .enabled(unified_gain), .codec_write(codec_write),
+      .host_word(host_word), .spi_word(rewritten_word));
+
+   task codec_word(input [31:0] original_word, input [31:0] expected_word);
+      begin
+         @(negedge clk);
+         codec_write = 1;
+         host_word = original_word;
+         #1;
+         if (rewritten_word !== expected_word)
+           $fatal(1, "unexpected codec SPI word: %h, wanted %h", rewritten_word, expected_word);
+         @(negedge clk);
+         codec_write = 0;
+      end
+   endtask
 
    always @(posedge clk) begin
       if (strobe && address == 10) begin
@@ -119,7 +142,27 @@ module rx_retune_tb;
       calibration_test(0);
       calibration_test(1);
       run(32'h13300000, 0, 0, 0, 0, 0);
-      $display("Fast Lock recall/refill, lock timeout, RF DC polling and timeout passed");
+      codec_word(32'h81302300, 32'h81302300);
+      codec_word(32'h81310400, 32'h81310400);
+      run(32'h15400001, 0, 0, 0, 0, 0);
+      if (!unified_gain || result[23:16] !== 8'ha5) $fatal(1, "gain mode did not enable");
+      if (rewritten_word !== host_word) $fatal(1, "rewrote a non-codec SPI transaction");
+      codec_word(32'h81310400, 32'h81312400);
+      codec_word(32'h81322c00, 32'h81322100);
+      codec_word(32'h81330000, 32'h81332000);
+      codec_word(32'h81371e00, 32'h81371e00);
+      codec_word(32'h01310000, 32'h01310000);
+      codec_word(32'h81304d00, 32'h81304d00);
+      codec_word(32'h8131ff00, 32'h81310000);
+      @(negedge clk);
+      codec_reset = 1;
+      @(negedge clk);
+      codec_reset = 0;
+      if (unified_gain) $fatal(1, "codec reset did not clear unified mode");
+      codec_word(32'h8131ff00, 32'h8131ff00);
+      run(32'h17400000, 0, 0, 0, 0, 0);
+      if (unified_gain || result[23:16] !== 8'ha4) $fatal(1, "gain mode did not disable");
+      $display("Fast Lock, RF DC polling, and unified gain SPI substitution passed");
       $finish;
    end
 

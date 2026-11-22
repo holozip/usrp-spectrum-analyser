@@ -1,7 +1,6 @@
 """Local, receive-only B210 spectrum dashboard."""
 import argparse
 import json
-import os
 import threading
 import time
 from collections import deque
@@ -21,7 +20,9 @@ DETAIL_BINS = DISPLAY_BINS * BINS_PER_OVERVIEW
 OVERVIEW_WIDTH = (HIGH - LOW) / DISPLAY_BINS
 FFT_SIZE = 16384
 PAGE = Path(__file__).with_name("index.html")
-BUNDLED_RETUNE_IMAGE = Path(__file__).resolve().parents[2] / "resources/firmware/usrp_b210_retune.bin"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BUNDLED_RETUNE_IMAGE = REPO_ROOT / "resources/firmware/usrp_b210_retune.bin"
+UNIFIED_GAIN_ROM = REPO_ROOT / "src/firmware/rtl/control/unified_rx_gain.mem"
 PEAK_BUCKET_SECONDS = 0.2
 CONTINUOUS_UPDATE_SECONDS = 0.04
 DETAIL_WIDTH = (HIGH - LOW) / DETAIL_BINS
@@ -250,7 +251,8 @@ class Sweep:
                         self.capture_gain = receiver.radio.get_rx_gain(0)
                         if self.args.fpga_band_sweep:
                             centers, _, _ = captures(receiver.rate, receiver.bandwidth, paired)
-                            receiver = BandSweep(receiver, centers)
+                            receiver = BandSweep(receiver, centers,
+                                                 unified_gain=self.args.gain_table == "unified")
                 gain = self.requested_gain
                 if not self.args.demo and gain != applied_request:
                     if isinstance(receiver, BandSweep):
@@ -378,7 +380,7 @@ def main():
     parser.add_argument("--hop-plan", choices=["uniform", "paired"], default="paired",
                         help="sweep center spacing (default: %(default)s)")
     parser.add_argument("--gain-table", choices=["stock", "unified"], default="stock",
-                        help="receive gain table (unified requires patched UHD)")
+                        help="receive gain table (unified requires a compatible FPGA sweep image)")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
     if not 4 <= args.rate <= MAX_RATE:
@@ -393,26 +395,18 @@ def main():
         args.device += f",enable_user_regs,fpga={args.fpga_band_sweep.resolve()}"
     gain_stages = []
     if args.gain_table == "unified":
-        if args.demo:
-            parser.error("--gain-table unified requires live reception")
-        import ctypes
-
+        if not args.fpga_band_sweep:
+            parser.error("--gain-table unified requires --fpga-band-sweep")
         try:
-            import uhd
+            rows = (line.partition("//")[0].strip() for line in UNIFIED_GAIN_ROM.read_text().splitlines())
+            words = [int(row, 16) for row in rows if row]
+            if len(words) != 77 or not all(0 <= word < (1 << 24) for word in words):
+                raise ValueError("expected 77 three-byte rows")
+        except (OSError, ValueError) as error:
+            parser.error(f"invalid FPGA gain table: {error}")
+        gain_stages = [[(word >> 21) & 3, (word >> 16) & 31, (word >> 13) & 1, (word >> 8) & 31]
+                       for word in words]
 
-            binding = ctypes.CDLL(uhd.libpyuhd.__file__)
-            getattr(binding, "usrp_spectrum_unified_gain_table_v1")
-        except (ImportError, OSError, AttributeError):
-            parser.error("--gain-table unified requires the patched UHD library (see README)")
-        read_stages = getattr(binding, "usrp_spectrum_unified_gain_stages_v1", None)
-        if read_stages is not None:
-            read_stages.argtypes = [ctypes.c_int]
-            read_stages.restype = ctypes.c_uint
-            for gain in range(77):
-                word = read_stages(gain)
-                gain_stages.append([(word >> 13) & 3, (word >> 8) & 15, (word >> 5) & 1, word & 31])
-
-    os.environ["USRP_SPECTRUM_RX_GAIN_TABLE"] = args.gain_table
     if not 0 < args.spur_strength <= 1:
         parser.error("--spur-strength must be greater than 0 and at most 1")
     if args.spur_reference and args.rate != MAX_RATE:
