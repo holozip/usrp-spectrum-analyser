@@ -1,6 +1,7 @@
 """Local, receive-only B210 spectrum dashboard."""
 import argparse
 import json
+import os
 import threading
 import time
 from collections import deque
@@ -227,6 +228,8 @@ class Sweep:
     def __init__(self, args):
         self.args = args
         self.focus = None
+        self.requested_gain = args.gain
+        self.capture_gain = None
         self.recent_details = deque(maxlen=4)
         self.recent_peaks = RecentPeaks()
         self.snapshot = dict(demo=args.demo, fpga=bool(args.fpga_band_sweep), trace=[], number=0, progress=0, error=None,
@@ -243,9 +246,22 @@ class Sweep:
                         receiver = Demo(self.args.rate * 1e6)
                     else:
                         receiver = Receiver(self.args)
+                        applied_request = self.args.gain
+                        self.capture_gain = receiver.radio.get_rx_gain(0)
                         if self.args.fpga_band_sweep:
                             centers, _, _ = captures(receiver.rate, receiver.bandwidth, paired)
                             receiver = BandSweep(receiver, centers)
+                gain = self.requested_gain
+                if not self.args.demo and gain != applied_request:
+                    if isinstance(receiver, BandSweep):
+                        receiver.control.leave()
+                        radio = receiver.receiver.radio
+                    else:
+                        radio = receiver.radio
+                    radio.set_rx_gain(gain, 0)
+                    self.capture_gain = radio.get_rx_gain(0)
+                    applied_request = gain
+                    self.recent_peaks = RecentPeaks()
                 focus = self.focus
                 if focus is None and self.recent_peaks.region is not None:
                     self.recent_peaks = RecentPeaks()
@@ -254,7 +270,7 @@ class Sweep:
                     self.scan(receiver, focus, paired)
                     self.cache_detail()
                 else:
-                    self.continuous(receiver, focus, plan)
+                    self.continuous(receiver, focus, plan, gain)
             except Exception as error:
                 self.snapshot = dict(self.snapshot, error=str(error), progress=0)
                 receiver = None
@@ -282,7 +298,7 @@ class Sweep:
         self.publish(bins, peaks, low, high, first * BINS_PER_OVERVIEW, BINS_PER_OVERVIEW,
                      seconds=round(time.perf_counter() - started, 2), hops=len(centers))
 
-    def continuous(self, receiver, focus, plan):
+    def continuous(self, receiver, focus, plan, gain):
         center, low, high, first, size = plan
         if isinstance(receiver, BandSweep):
             actual = receiver.tune_continuous(center)
@@ -311,7 +327,7 @@ class Sweep:
         self.recent_peaks = RecentPeaks()
         radio.start_continuous()
         try:
-            while self.focus == focus:
+            while self.focus == focus and self.requested_gain == gain:
                 if not radio.receive(actual, continuous=True):
                     gaps += 1
                     continue
@@ -336,6 +352,7 @@ class Sweep:
         overview = bins.reshape(-1, group).max(axis=1)
         trace = [round(float(value), 1) if np.isfinite(value) else None for value in overview]
         self.snapshot = dict(self.snapshot, trace=trace, number=self.snapshot["number"] + 1, progress=1, error=None,
+                             gain=getattr(self, "capture_gain", None),
                              low=low, high=high, detail_offset=first, detail_count=len(bins),
                              detail=bins.astype("<f4", copy=False).tobytes(),
                              peak_detail=peaks.astype("<f4", copy=False).tobytes() if peaks is not None else b"",
@@ -354,10 +371,14 @@ def main():
     parser.add_argument("--antenna", choices=["RX2", "TX/RX"], default="RX2")
     parser.add_argument("--spur-reference", type=Path,
                         help="terminated 56 MS/s reference archive for optional display suppression")
+    parser.add_argument("--spur-strength", type=float, default=1.0,
+                        help="fraction of reference spur power to subtract (default: %(default)s)")
     parser.add_argument("--fpga-band-sweep", nargs="?", type=Path, const=BUNDLED_RETUNE_IMAGE,
                         help="enable Fast Lock with the bundled image or an explicit image path")
     parser.add_argument("--hop-plan", choices=["uniform", "paired"], default="paired",
                         help="sweep center spacing (default: %(default)s)")
+    parser.add_argument("--gain-table", choices=["stock", "unified"], default="stock",
+                        help="receive gain table (unified requires patched UHD)")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
     if not 4 <= args.rate <= MAX_RATE:
@@ -370,13 +391,41 @@ def main():
         if any(field.strip().startswith("fpga=") for field in args.device.split(",")):
             parser.error("specify the image only through --fpga-band-sweep")
         args.device += f",enable_user_regs,fpga={args.fpga_band_sweep.resolve()}"
+    gain_stages = []
+    if args.gain_table == "unified":
+        if args.demo:
+            parser.error("--gain-table unified requires live reception")
+        import ctypes
+
+        try:
+            import uhd
+
+            binding = ctypes.CDLL(uhd.libpyuhd.__file__)
+            getattr(binding, "usrp_spectrum_unified_gain_table_v1")
+        except (ImportError, OSError, AttributeError):
+            parser.error("--gain-table unified requires the patched UHD library (see README)")
+        read_stages = getattr(binding, "usrp_spectrum_unified_gain_stages_v1", None)
+        if read_stages is not None:
+            read_stages.argtypes = [ctypes.c_int]
+            read_stages.restype = ctypes.c_uint
+            for gain in range(77):
+                word = read_stages(gain)
+                gain_stages.append([(word >> 13) & 3, (word >> 8) & 15, (word >> 5) & 1, word & 31])
+
+    os.environ["USRP_SPECTRUM_RX_GAIN_TABLE"] = args.gain_table
+    if not 0 < args.spur_strength <= 1:
+        parser.error("--spur-strength must be greater than 0 and at most 1")
     if args.spur_reference and args.rate != MAX_RATE:
         parser.error("--spur-reference requires a 56 MS/s sweep")
     try:
         corrections = clock_spurs(args.spur_reference) if args.spur_reference else []
     except (OSError, ValueError, KeyError, EOFError) as error:
         parser.error(f"invalid spur reference: {error}")
-    spur_data = json.dumps(corrections, allow_nan=False).encode()
+    spur_data = json.dumps(
+        [[index, spur * args.spur_strength, floor] for index, spur, floor in corrections],
+        allow_nan=False,
+    ).encode()
+    gain_stage_data = json.dumps(gain_stages).encode()
     page = PAGE.read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
@@ -386,9 +435,14 @@ def main():
             elif self.path == "/api/sweep":
                 snapshot = sweep.snapshot
                 frame = {key: value for key, value in snapshot.items() if key not in ("detail", "peak_detail")}
+                frame["gain_table"] = args.gain_table
+                frame["requested_gain"] = None if args.demo else sweep.requested_gain
+                frame["spur_reference_gain"] = args.gain
                 frame["focus"] = sweep.focus
                 frame["peaks"] = bool(snapshot["peak_detail"])
                 kind, body = "application/json", json.dumps(frame, allow_nan=False).encode()
+            elif self.path == "/api/gain-stages":
+                kind, body = "application/json", gain_stage_data
             elif self.path == "/api/spurs":
                 kind, body = "application/json", spur_data
             elif self.path.startswith("/api/detail/"):
@@ -412,14 +466,21 @@ def main():
             self.reply(kind, body)
 
         def do_POST(self):
-            if self.path != "/api/focus":
+            if self.path not in ("/api/focus", "/api/gain"):
                 self.send_error(404)
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if self.headers.get_content_type() != "application/json" or not 0 < length <= 128:
                     raise ValueError
-                focus = json.loads(self.rfile.read(length))
+                value = json.loads(self.rfile.read(length))
+                if self.path == "/api/gain":
+                    if args.demo or type(value) not in (int, float) or not 0 <= value <= 76:
+                        raise ValueError
+                    sweep.requested_gain = value
+                    self.reply("application/json", json.dumps(value).encode())
+                    return
+                focus = value
                 if focus is not None:
                     if (not isinstance(focus, list) or len(focus) != 2
                             or any(type(value) not in (int, float) for value in focus)
@@ -427,7 +488,11 @@ def main():
                         raise ValueError
                     focus = tuple(focus)
             except (ValueError, UnicodeError):
-                self.send_error(400, "Expected a frequency range in Hz or null")
+                messages = {
+                    "/api/gain": "Expected live RX gain from 0 to 76 dB",
+                    "/api/focus": "Expected a frequency range in Hz or null",
+                }
+                self.send_error(400, messages[self.path])
                 return
             sweep.focus = focus
             self.reply("application/json", json.dumps(focus).encode())

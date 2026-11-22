@@ -139,7 +139,6 @@ class BandSweep:
         actual = self.tune(center)
         self.read_calibration(actual, required=False)
         self.band = bisect_right(B210_RX_BAND_EDGES, actual)
-        self.previous_alc = None
         self.after_continuous = True
         return actual
 
@@ -154,11 +153,12 @@ class BandSweep:
             # The fixed-tune stream may already have calibrated near this anchor.
             self.read_calibration(actual, required=not self.after_continuous)
             self.after_continuous = False
-            self.previous_alc = None
             self.band = band
         if actual is None or index != anchor:
             actual, profile = self.profiles[index]
-            if self.previous_alc is None:
+            # A gain change can leave Fast Lock without changing bands.
+            # Restart from the hardware mode rather than the previous profile.
+            if self.control.normal_settings is None:
                 self.slot = 0
                 self.previous_alc = self.control.prepare(profile)
             else:

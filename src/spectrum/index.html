@@ -10,8 +10,17 @@ main { max-width: 1320px; margin: auto; padding: clamp(16px, 4vw, 56px); }
 header, .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
 h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: -.045em; }
 p { color: #a7babd; margin: 5px 0 0; }
-#spur-control[hidden] { display: none; }
-#spur-control { align-self: center; }
+#gain-control[hidden], #gain-stages[hidden], #spur-control[hidden] { display: none; }
+#spur-control, #peak-control { align-self: center; }
+#spur-status { color: #a7babd; font-size: .78rem; }
+#gain-control { display: flex; align-items: center; gap: 8px; padding: 0 8px; }
+#gain-control input { width: 110px; accent-color: #66dec5; }
+#gain-control output { min-width: 3.4em; font-variant-numeric: tabular-nums; }
+.gain-settings { align-self: center; }
+#gain-stages { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 3px 8px 0; color: #a7babd; font-size: .78rem; }
+#gain-stages span { white-space: nowrap; }
+#gain-stages output { color: #ecf4f3; font-variant-numeric: tabular-nums; }
+
 .controls { display: flex; flex-wrap: wrap; gap: 8px; }
 button:disabled { opacity: .55; cursor: default; }
 button { font: inherit; color: inherit; background: #243136; border: 1px solid #53676b; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
@@ -29,10 +38,28 @@ footer { margin-top: 14px; color: #a7babd; font-size: .9rem; }
   <header>
     <div><h1>B210 Spectrum</h1><p>70 MHz – 6 GHz</p></div>
     <div class="controls">
+      <div class="gain-settings">
+        <label id="gain-control" hidden>RX gain
+          <input id="gain" type="range" min="0" max="76" step="1">
+          <output id="gain-value" for="gain"></output>
+        </label>
+        <div id="gain-stages" hidden aria-label="Unified gain-table stages, nominal gain at 2.3 GHz"
+             title="Stage indices and nominal gains from AD9361 UG-570. Actual gain varies with frequency.">
+          <span>LNA <output for="gain"></output></span>
+          <span>Mixer <output for="gain"></output></span>
+          <span>TIA <output for="gain"></output></span>
+          <span>LPF <output for="gain"></output></span>
+          <span>Nominal at 2.3 GHz</span>
+        </div>
+      </div>
       <button id="tuning-window" type="button" disabled>56 MHz window</button>
       <button id="zoom-in" type="button" disabled>Zoom in</button>
       <button id="reset" type="button" disabled>Reset zoom</button>
-      <label id="spur-control" hidden><input id="suppress-spurs" type="checkbox" checked> Suppress clock spurs</label>
+      <label id="spur-control" hidden>
+        <input id="suppress-spurs" type="checkbox" checked aria-describedby="spur-status"> Suppress clock spurs
+        <span id="spur-status" hidden></span>
+      </label>
+      <label id="peak-control"><input id="peak-hold" type="checkbox" checked> Peak hold</label>
       <button id="freeze" type="button" aria-pressed="false">Freeze trace</button>
     </div>
   </header>
@@ -53,13 +80,23 @@ const state = document.querySelector('#state');
 const progress = document.querySelector('#progress');
 const reading = document.querySelector('#reading');
 const peakKey = document.querySelector('#peak-key');
+const peakHold = document.querySelector('#peak-hold');
 const detail = document.querySelector('#detail');
 const freeze = document.querySelector('#freeze');
 const zoomIn = document.querySelector('#zoom-in');
 const tuningWindow = document.querySelector('#tuning-window');
 const reset = document.querySelector('#reset');
 const suppressSpurs = document.querySelector('#suppress-spurs');
-let spurCorrections = [], focusError = null;
+const gainControl = document.querySelector('#gain-control');
+const gainSlider = document.querySelector('#gain');
+const gainValue = document.querySelector('#gain-value');
+const stageReadout = document.querySelector('#gain-stages');
+const stageValues = stageReadout.querySelectorAll('output');
+let gainStages = [];
+const spurControl = document.querySelector('#spur-control');
+const spurStatus = document.querySelector('#spur-status');
+let spurCorrections = [], focusError = null, gainError = null;
+let previewingGain = false, pendingGain = null;
 let rangeUpdate = Promise.resolve();
 const LEFT = 58, RIGHT_MARGIN = 20;
 let latest, shown, frozen = false, cursor = null, view = null, drag = null;
@@ -118,10 +155,10 @@ function draw() {
   const dataSpan = dataHigh - dataLow;
   const span = high - low;
   const fineLabels = span < 20e6;
-  const filtered = suppressSpurs.checked && spurCorrections.length && shown?.levels ? filteredTrace(shown) : shown;
+  const filtered = suppressSpurs.checked && spurCorrections.length && shown?.levels && spurReferenceMatches(shown) ? filteredTrace(shown) : shown;
   const level = view ? filtered?.levels?.findIndex(values => values.length * span / dataSpan <= 4096) : -1;
   const values = level >= 0 ? filtered.levels[level] : (filtered?.trace || []);
-  const peaks = level >= 0 ? filtered.peakLevels?.[level] : null;
+  const peaks = peakHold.checked && level >= 0 ? filtered.peakLevels?.[level] : null;
   peakKey.hidden = !peaks;
   const binWidth = dataSpan / values.length;
   const first = Math.max(0, Math.floor((low - dataLow) / binWidth) - 1);
@@ -197,6 +234,18 @@ function draw() {
   }
 }
 
+function spurReferenceMatches(frame) {
+  return frame?.gain != null && frame.gain === frame.spur_reference_gain;
+}
+
+function updateSpurControl() {
+  spurControl.hidden = !spurCorrections.length;
+  spurStatus.hidden = !suppressSpurs.checked || spurReferenceMatches(shown);
+  if (!spurStatus.hidden) {
+    spurStatus.textContent = 'Paused · reference at ' + latest.spur_reference_gain + ' dB';
+  }
+}
+
 function render() {
   if (!latest) return;
   const mode = latest.demo ? 'Demo' : latest.fpga ? 'B210 FPGA' : 'B210';
@@ -206,6 +255,14 @@ function render() {
   progress.value = latest.progress;
   const changed = !frozen && shown?.number !== latest.number;
   if (!frozen) shown = latest;
+  gainControl.hidden = latest.requested_gain == null;
+  if (pendingGain === latest.requested_gain) pendingGain = null;
+  if (!previewingGain && pendingGain === null && latest.requested_gain != null) {
+    gainSlider.value = latest.requested_gain;
+    gainValue.value = latest.requested_gain + ' dB';
+  }
+  showGainStages();
+  updateSpurControl();
   const focused = shown && (shown.low > fullRange()[0] || shown.high < fullRange()[1]);
   const sweep = shown?.number ? (focused ? 'Focused sweep' : 'Full sweep') + ' · '
     + shown.hops + ' hops · ' + shown.seconds + ' s per pass' : 'Waiting for the first sweep';
@@ -213,9 +270,13 @@ function render() {
     ? (shown.detail_offset === null ? 'Full 56 MHz window · DC and filter edges visible' : 'Fixed tuning')
       + ' · 56 MS/s · Eight FFT averages' + (shown.gaps ? ' · RX gaps ' + shown.gaps : '')
     : sweep;
-  detail.textContent = latest.error || focusError || capture;
+  const gainPending = pendingGain !== null || (!latest.demo && latest.gain != null
+    && latest.gain !== Math.trunc(latest.requested_gain));
+  detail.textContent = latest.error || focusError || gainError || (gainPending ? 'Applying RX gain…' : capture);
   if (changed) draw();
 }
+
+peakHold.addEventListener('change', draw);
 
 freeze.addEventListener('click', () => {
   frozen = !frozen;
@@ -328,13 +389,70 @@ function filteredTrace(frame) {
   return frame.filtered;
 }
 
-suppressSpurs.addEventListener('change', draw);
+function showGainStages() {
+  const gain = previewingGain ? Number(gainSlider.value) : pendingGain ?? latest?.requested_gain;
+  const values = gainStages[Math.trunc(gain)];
+  stageReadout.hidden = !values;
+  if (!values) return;
+  const [lna, mixer, tia, lpf] = values;
+  // AD9361 UG-570, tables 27–30. LNA and mixer gain vary with frequency.
+  const nominal = [[3, 14, 17, 21][lna], mixer < 3 ? [0, 3, 9][mixer] : mixer + 11,
+    [-6, 0][tia], lpf];
+  stageValues.forEach((output, index) => {
+    const text = values[index] + ' (' + nominal[index] + ' dB)';
+    if (output.value !== text) output.value = text;
+  });
+}
+
+async function loadGainStages() {
+  try {
+    const response = await fetch('/api/gain-stages');
+    if (!response.ok) return;
+    gainStages = await response.json();
+    showGainStages();
+  } catch {
+    // Gain control remains available if the optional breakdown cannot be loaded.
+  }
+}
+loadGainStages();
+
+gainSlider.addEventListener('input', () => {
+  previewingGain = true;
+  gainValue.value = gainSlider.value + ' dB';
+  showGainStages();
+});
+gainSlider.addEventListener('change', async () => {
+  previewingGain = false;
+  pendingGain = Number(gainSlider.value);
+  gainError = null;
+  gainSlider.disabled = true;
+  render();
+  try {
+    const response = await fetch('/api/gain', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(pendingGain)
+    });
+    if (!response.ok) throw new Error(response.status);
+  } catch {
+    pendingGain = null;
+    gainError = 'Could not change RX gain';
+  } finally {
+    gainSlider.disabled = false;
+    render();
+  }
+});
+
+suppressSpurs.addEventListener('change', () => {
+  updateSpurControl();
+  draw();
+});
 async function loadSpurReference() {
   try {
     const response = await fetch('/api/spurs');
     if (!response.ok) return;
     spurCorrections = await response.json();
-    document.querySelector('#spur-control').hidden = !spurCorrections.length;
+    render();
     draw();
   } catch {
     // Raw viewing remains available if the optional reference cannot be loaded.
