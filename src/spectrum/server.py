@@ -27,9 +27,6 @@ UNIFIED_GAIN_ROM = REPO_ROOT / "src/firmware/rtl/control/unified_rx_gain.mem"
 PEAK_BUCKET_SECONDS = 0.2
 CONTINUOUS_UPDATE_SECONDS = 0.04
 DETAIL_WIDTH = (HIGH - LOW) / DETAIL_BINS
-HOP_COMPARE_WIDTH = 100e3
-HOP_COMPARE_RATIO = 10 ** (12 / 10)
-HOP_COMPARE_PASSES = 3
 
 
 def captures(rate, bandwidth, paired=False):
@@ -56,6 +53,19 @@ def captures(rate, bandwidth, paired=False):
         count = int(np.ceil(span / step)) + 1
         centers = np.linspace(LOW + margin, HIGH - margin, count)
     return centers, offsets, usable
+
+
+def offset_hop_plan(centers):
+    # Move both hops in each pair together and pin the pairs at the band edges.
+    pair = np.arange(len(centers) // 2)
+    taper = np.minimum(1, np.minimum(pair, pair[-1] - pair) / 6)
+    return centers + np.repeat(5e6 * taper, 2)
+
+
+def minimum_trace(first, second):
+    # A missing observation must not overwrite a measured bin.
+    both = np.isfinite(first) & np.isfinite(second)
+    return np.where(both, np.minimum(first, second), np.fmax(first, second))
 
 
 def scan_range(centers, focus, paired=False):
@@ -221,79 +231,21 @@ class RecentPeaks:
         return self.current if self.previous is None else np.maximum(self.current, self.previous)
 
 
-class HopDisagreements:
-    def __init__(self, centers, offsets, usable):
-        tile_count = int((HIGH - LOW) / HOP_COMPARE_WIDTH)
-        self.bin_width = offsets[1] - offsets[0]
-        full_tile = int(HOP_COMPARE_WIDTH / self.bin_width)
-        coverage = np.zeros(tile_count, dtype=np.uint8)
-        captures = []
-        for center in centers:
-            frequency = center + offsets
-            bins = np.flatnonzero(usable & (frequency >= LOW) & (frequency < HIGH))
-            tiles = ((frequency[bins] - LOW) / HOP_COMPARE_WIDTH).astype(int)
-            complete = np.bincount(tiles, minlength=tile_count) >= full_tile
-            coverage += complete
-            include = complete[tiles]
-            captures.append((bins[include], tiles[include]))
-
-        # Compare complete slices observed at two distinct tuning centers.
-        self.tiles = np.flatnonzero(coverage == 2)
-        self.hops = []
-        seen = np.zeros(tile_count, dtype=np.uint8)
-        for bins, tiles in captures:
-            include = coverage[tiles] == 2
-            tile, index, count = np.unique(tiles[include], return_inverse=True, return_counts=True)
-            self.hops.append((bins[include], tile, index, count, seen[tile]))
-            seen[tile] += 1
-        self.power = np.empty((2, tile_count))
-        self.direction = np.zeros(self.tiles.size, dtype=np.int8)
-        self.streak = np.zeros_like(self.direction)
-        self.region = None
-
-    def reset(self):
-        self.direction.fill(0)
-        self.streak.fill(0)
-        self.region = None
-
-    def start(self, region):
-        if region != self.region:
-            self.reset()
-            self.region = region
-        self.power.fill(np.nan)
-
-    def record(self, hop, power):
-        bins, tile, index, count, row = self.hops[hop]
-        self.power[row, tile] = np.bincount(index, weights=power[bins]) / count
-
-    def finish(self, low, high):
-        earlier, later = np.maximum(1e-16, self.power[:, self.tiles])
-        direction = (later >= HOP_COMPARE_RATIO * earlier).astype(np.int8)
-        direction -= earlier >= HOP_COMPARE_RATIO * later
-        direction[~(np.isfinite(earlier) & np.isfinite(later))] = 0
-        self.streak = np.where(direction == self.direction, np.minimum(self.streak + 1, HOP_COMPARE_PASSES), 1)
-        self.direction = direction
-        starts = LOW + self.tiles * HOP_COMPARE_WIDTH
-        confirmed = self.tiles[(direction != 0) & (self.streak >= HOP_COMPARE_PASSES)
-                               & (starts < high) & (starts + HOP_COMPARE_WIDTH > low)]
-        if not confirmed.size:
-            return []
-        runs = np.split(confirmed, np.flatnonzero(np.diff(confirmed) > 1) + 1)
-        return [[max(low, LOW + tiles[0] * HOP_COMPARE_WIDTH), min(high, LOW + (tiles[-1] + 1) * HOP_COMPARE_WIDTH)]
-                for tiles in runs]
-
-
 class Sweep:
     def __init__(self, args):
         self.args = args
         self.focus = None
         self.requested_gain = args.gain
         self.capture_gain = None
+        self.image_reject_available = False
+        self.image_reject_requested = False
+        self.image_reference = None
+        self.image_region = None
+        self.shifted_peaks = RecentPeaks()
         self.recent_details = deque(maxlen=4)
         self.recent_peaks = RecentPeaks()
-        self.hop_comparison = None
         self.snapshot = dict(demo=args.demo, fpga=bool(args.fpga_band_sweep), trace=[], number=0, progress=0, error=None,
-                             low=LOW, high=HIGH, seconds=None, detail=b"", peak_detail=b"")
+                             low=LOW, high=HIGH, seconds=None, detail=b"", peak_detail=b"", pair_detail=b"")
         threading.Thread(target=self.run, daemon=True).start()
 
     def run(self):
@@ -311,10 +263,14 @@ class Sweep:
                         self.capture_rate = receiver.rate
                         self.capture_bandwidth = receiver.bandwidth
                         self.master_clock = receiver.master_clock
-                        if self.args.fpga_band_sweep:
-                            centers, _, _ = captures(receiver.rate, receiver.bandwidth, paired)
-                            receiver = BandSweep(receiver, centers,
-                                                 unified_gain=self.args.gain_table == "unified")
+                    centers, offsets, usable = captures(receiver.rate, receiver.bandwidth, paired)
+                    self.image_reject_available = (
+                        not self.args.demo and paired and receiver.rate == receiver.bandwidth == 56e6
+                    )
+                    shifted = offset_hop_plan(centers) if self.image_reject_available else centers
+                    if self.args.fpga_band_sweep:
+                        receiver = BandSweep(receiver, np.union1d(centers, shifted),
+                                             unified_gain=self.args.gain_table == "unified")
                 gain = self.requested_gain
                 if not self.args.demo and gain != applied_request:
                     if isinstance(receiver, BandSweep):
@@ -330,33 +286,37 @@ class Sweep:
                 if focus is None and self.recent_peaks.region is not None:
                     self.recent_peaks = RecentPeaks()
                 plan = None if self.args.demo else continuous_plan(focus, receiver.rate, receiver.bandwidth)
+                image_region = ((focus, self.capture_gain) if plan is None and self.image_reject_available
+                                and self.image_reject_requested else None)
+                if image_region != self.image_region:
+                    self.image_region = image_region
+                    self.image_reference = None
+                    self.recent_peaks = RecentPeaks()
+                    self.shifted_peaks = RecentPeaks()
                 if plan is None:
                     if not self.args.demo:
                         rf = receiver.receiver if isinstance(receiver, BandSweep) else receiver
                         rf.set_stream_rate(rf.rate)
-                    self.scan(receiver, focus, paired)
+                    leg = None
+                    if image_region is not None:
+                        leg = "A" if self.image_reference is None else "B"
+                    layout = (shifted if leg == "B" else centers, offsets, usable)
+                    self.scan(receiver, focus, paired, layout, leg)
                     self.cache_detail()
                 else:
-                    if self.hop_comparison is not None:
-                        self.hop_comparison.reset()
                     self.continuous(receiver, focus, plan, gain)
             except Exception as error:
                 self.snapshot = dict(self.snapshot, error=str(error), progress=0)
                 receiver = None
                 self.recent_peaks = RecentPeaks()
-                self.hop_comparison = None
+                self.shifted_peaks = RecentPeaks()
+                self.image_reference = None
+                self.image_region = None
                 time.sleep(3)
 
-    def scan(self, receiver, focus=None, paired=False):
-        all_centers, offsets, usable = captures(receiver.rate, receiver.bandwidth, paired)
-        low, high, first, count, centers = scan_range(all_centers, focus, paired)
-        comparison = None
-        if paired and not isinstance(receiver, Demo):
-            if self.hop_comparison is None:
-                self.hop_comparison = HopDisagreements(all_centers, offsets, usable)
-            comparison = self.hop_comparison
-            comparison.start((focus, self.capture_gain))
-            first_hop = all_centers.searchsorted(centers[0])
+    def scan(self, receiver, focus=None, paired=False, layout=None, leg=None):
+        centers, offsets, usable = layout if layout is not None else captures(receiver.rate, receiver.bandwidth, paired)
+        low, high, first, count, centers = scan_range(centers, focus, paired)
         detail_count = count * BINS_PER_OVERVIEW
         self.snapshot = dict(self.snapshot, progress=0)
         started = time.perf_counter()
@@ -366,19 +326,28 @@ class Sweep:
             mask = usable & (frequency >= low) & (frequency <= high) & np.isfinite(power)
             indices = ((frequency[mask] - low) * detail_count / (high - low)).astype(int)
             np.maximum.at(bins, np.minimum(indices, detail_count - 1), power[mask])
-            # Ignore a hop if the radio tunes far enough from the plan to shift its FFT grid.
-            if comparison is not None and abs(frequency[0] - (center + offsets[0])) < comparison.bin_width / 2:
-                comparison.record(first_hop + index, power)
             self.snapshot = dict(self.snapshot, progress=(index + 1) / len(centers), error=None)
         measured = np.isfinite(bins)
         bins[measured] = 10 * np.log10(np.maximum(1e-16, bins[measured]))
         peaks = None
         if focus is not None:
-            peaks = self.recent_peaks.update((low, high), bins, time.perf_counter())
-        disagreements = comparison.finish(low, high) if comparison is not None else []
+            history = self.shifted_peaks if leg == "B" else self.recent_peaks
+            peaks = history.update((low, high), bins, time.perf_counter())
+        pair_detail = b""
+        reference_has_peaks = False
+        if leg == "A":
+            self.image_reference = bins, peaks
+        elif leg == "B":
+            reference, reference_peaks = self.image_reference
+            rejected = minimum_trace(reference, bins)
+            pair_detail = reference.astype("<f4", copy=False).tobytes() + rejected.astype("<f4", copy=False).tobytes()
+            if reference_peaks is not None:
+                pair_detail += reference_peaks.astype("<f4", copy=False).tobytes()
+                reference_has_peaks = True
+            self.image_reference = None
         self.publish(bins, peaks, low, high, first * BINS_PER_OVERVIEW, BINS_PER_OVERVIEW,
                      seconds=round(time.perf_counter() - started, 2), hops=len(centers), focus=focus,
-                     hop_disagreements=disagreements)
+                     image_leg=leg, pair_detail=pair_detail, reference_has_peaks=reference_has_peaks)
 
     def continuous(self, receiver, focus, plan, gain):
         center, low, high, first, size = plan
@@ -458,7 +427,7 @@ class Sweep:
 
     def publish(self, bins, peaks, low, high, first, group, seconds, hops,
                 continuous=False, windows=0, gaps=0, focus=None, fft_size=FFT_SIZE, full_window=False,
-                stream_rate=None, hop_disagreements=()):
+                stream_rate=None, image_leg=None, pair_detail=b"", reference_has_peaks=False):
         overview = bins.reshape(-1, group).max(axis=1)
         trace = [round(float(value), 1) if np.isfinite(value) else None for value in overview]
         self.snapshot = dict(self.snapshot, trace=trace, number=self.snapshot["number"] + 1, progress=1, error=None,
@@ -469,11 +438,13 @@ class Sweep:
                              low=low, high=high, detail_offset=first, detail_count=len(bins),
                              detail=bins.astype("<f4", copy=False).tobytes(),
                              peak_detail=peaks.astype("<f4", copy=False).tobytes() if peaks is not None else b"",
+                             image_leg=image_leg, pair_detail=pair_detail, reference_has_peaks=reference_has_peaks,
                              seconds=seconds, hops=hops, continuous=continuous, windows=windows, gaps=gaps,
-                             fft_size=fft_size, full_window=full_window, hop_disagreements=hop_disagreements)
+                             fft_size=fft_size, full_window=full_window)
 
     def cache_detail(self):
-        self.recent_details.append((self.snapshot["number"], self.snapshot["detail"], self.snapshot["peak_detail"]))
+        frame = self.snapshot
+        self.recent_details.append((frame["number"], frame["detail"], frame["peak_detail"], frame["pair_detail"]))
 
 
 def main():
@@ -524,11 +495,14 @@ def main():
                 kind, body = "text/html; charset=utf-8", page
             elif self.path == "/api/sweep":
                 snapshot = sweep.snapshot
-                frame = {key: value for key, value in snapshot.items() if key not in ("detail", "peak_detail")}
+                frame = {key: value for key, value in snapshot.items() if key not in ("detail", "peak_detail", "pair_detail")}
                 frame["gain_table"] = args.gain_table
                 frame["requested_gain"] = None if args.demo else sweep.requested_gain
                 frame["focus"] = sweep.focus
                 frame["peaks"] = bool(snapshot["peak_detail"])
+                frame["image_reject_available"] = sweep.image_reject_available
+                frame["image_reject_requested"] = sweep.image_reject_requested
+                frame["image_pair"] = bool(snapshot["pair_detail"])
                 kind, body = "application/json", json.dumps(frame, allow_nan=False).encode()
             elif self.path == "/api/gain-stages":
                 kind, body = "application/json", gain_stage_data
@@ -536,16 +510,19 @@ def main():
                 path, _, query = self.path.partition("?")
                 frame = sweep.snapshot
                 if path == f"/api/detail/{frame['number']}" and frame["detail"]:
-                    body, peaks = frame["detail"], frame["peak_detail"]
+                    body, peaks, pair = frame["detail"], frame["peak_detail"], frame["pair_detail"]
                 else:
-                    cached = next(((data, peaks) for number, data, peaks in sweep.recent_details.copy()
+                    cached = next(((data, peaks, pair) for number, data, peaks, pair in sweep.recent_details.copy()
                                    if path == f"/api/detail/{number}"), None)
                     if cached is None:
                         self.send_error(404)
                         return
-                    body, peaks = cached
-                if query == "peaks=1" and peaks:
+                    body, peaks, pair = cached
+                options = query.split("&")
+                if "peaks=1" in options and peaks:
                     body += peaks
+                if "pair=1" in options and pair:
+                    body += pair
                 kind = "application/octet-stream"
             else:
                 self.send_error(404)
@@ -553,7 +530,7 @@ def main():
             self.reply(kind, body)
 
         def do_POST(self):
-            if self.path not in ("/api/focus", "/api/gain"):
+            if self.path not in ("/api/focus", "/api/gain", "/api/image-reject"):
                 self.send_error(404)
                 return
             try:
@@ -561,6 +538,12 @@ def main():
                 if self.headers.get_content_type() != "application/json" or not 0 < length <= 128:
                     raise ValueError
                 value = json.loads(self.rfile.read(length))
+                if self.path == "/api/image-reject":
+                    if not sweep.image_reject_available or type(value) is not bool:
+                        raise ValueError
+                    sweep.image_reject_requested = value
+                    self.reply("application/json", json.dumps(value).encode())
+                    return
                 if self.path == "/api/gain":
                     if args.demo or type(value) not in (int, float) or not 0 <= value <= 76:
                         raise ValueError
@@ -578,6 +561,7 @@ def main():
                 messages = {
                     "/api/gain": "Expected live RX gain from 0 to 76 dB",
                     "/api/focus": "Expected a frequency range in Hz or null",
+                    "/api/image-reject": "Image rejection requires a live paired sweep at 56 MS/s and a boolean value",
                 }
                 self.send_error(400, messages[self.path])
                 return
