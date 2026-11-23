@@ -1,9 +1,10 @@
 """Local, receive-only B210 spectrum dashboard."""
 import argparse
 import json
+import mimetypes
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -14,14 +15,15 @@ from fpga_sweep import BandSweep
 LOW, HIGH = 70e6, 6e9
 MAX_RATE = 56
 NARROW_RATE = MAX_RATE * 1e6 / 4
-AVERAGES = 8
+DEFAULT_AVERAGES = 8
+MAX_AVERAGES = 32
 DISPLAY_BINS = 4096
 BINS_PER_OVERVIEW = 384
 DETAIL_BINS = DISPLAY_BINS * BINS_PER_OVERVIEW
 OVERVIEW_WIDTH = (HIGH - LOW) / DISPLAY_BINS
 FFT_SIZE = 16384
-PAGE = Path(__file__).with_name("index.html")
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DASHBOARD = REPO_ROOT / "build/spectrum"
 BUNDLED_RETUNE_IMAGE = REPO_ROOT / "resources/firmware/usrp_b210_retune.bin"
 UNIFIED_GAIN_ROM = REPO_ROOT / "src/firmware/rtl/control/unified_rx_gain.mem"
 PEAK_BUCKET_SECONDS = 0.2
@@ -55,11 +57,11 @@ def captures(rate, bandwidth, paired=False):
     return centers, offsets, usable
 
 
-def offset_hop_plan(centers):
+def offset_hop_plan(centers, shift=5e6):
     # Move both hops in each pair together and pin the pairs at the band edges.
     pair = np.arange(len(centers) // 2)
     taper = np.minimum(1, np.minimum(pair, pair[-1] - pair) / 6)
-    return centers + np.repeat(5e6 * taper, 2)
+    return centers + np.repeat(shift * taper, 2)
 
 
 def minimum_trace(first, second):
@@ -129,15 +131,19 @@ class Receiver:
         self.command = uhd.types.StreamCMD(uhd.types.StreamMode.num_done)
         self.command.stream_now = True
         self.size = 0
+        self.averages = args.averages
         self.set_fft_size(FFT_SIZE)
 
-    def set_fft_size(self, size):
-        if self.size == size:
+    def set_fft_size(self, size, averages=None):
+        averages = self.averages if averages is None else averages
+        if self.size == size and self.averages == averages:
             return
+        if self.size != size:
+            self.window = np.hanning(size)
+            self.window_sum = self.window.sum()
         self.size = size
-        self.window = np.hanning(size)
-        self.window_sum = self.window.sum()
-        self.command.num_samps = size * AVERAGES
+        self.averages = averages
+        self.command.num_samps = size * averages
         self.samples = np.empty((1, self.command.num_samps), dtype=np.complex64)
 
     def set_stream_rate(self, rate):
@@ -192,7 +198,7 @@ class Receiver:
         return True
 
     def spectrum(self):
-        blocks = self.samples.reshape(AVERAGES, self.size)
+        blocks = self.samples.reshape(self.averages, self.size)
         fft = np.fft.fftshift(np.fft.fft((blocks - blocks.mean(axis=1, keepdims=True)) * self.window), axes=1)
         return np.mean(np.abs(fft / self.window_sum) ** 2, axis=0)
 
@@ -236,16 +242,18 @@ class Sweep:
         self.args = args
         self.focus = None
         self.requested_gain = args.gain
+        self.requested_averages = args.averages
         self.capture_gain = None
+        self.capture_averages = None
         self.image_reject_available = False
         self.image_reject_requested = False
-        self.image_reference = None
+        self.image_references = []
         self.image_region = None
-        self.shifted_peaks = RecentPeaks()
+        self.shifted_peaks = defaultdict(RecentPeaks)
         self.recent_details = deque(maxlen=4)
         self.recent_peaks = RecentPeaks()
         self.snapshot = dict(demo=args.demo, fpga=bool(args.fpga_band_sweep), trace=[], number=0, progress=0, error=None,
-                             low=LOW, high=HIGH, seconds=None, detail=b"", peak_detail=b"", pair_detail=b"")
+                             low=LOW, high=HIGH, seconds=None, detail=b"", peak_detail=b"", image_detail=b"")
         threading.Thread(target=self.run, daemon=True).start()
 
     def run(self):
@@ -267,10 +275,13 @@ class Sweep:
                     self.image_reject_available = (
                         not self.args.demo and paired and receiver.rate == receiver.bandwidth == 56e6
                     )
-                    shifted = offset_hop_plan(centers) if self.image_reject_available else centers
+                    plans = (centers,)
+                    if self.image_reject_available:
+                        plans = centers, offset_hop_plan(centers), offset_hop_plan(centers, -5e6)
                     if self.args.fpga_band_sweep:
-                        receiver = BandSweep(receiver, np.union1d(centers, shifted),
+                        receiver = BandSweep(receiver, np.unique(np.concatenate(plans)),
                                              unified_gain=self.args.gain_table == "unified")
+                rf = receiver.receiver if isinstance(receiver, BandSweep) else receiver
                 gain = self.requested_gain
                 if not self.args.demo and gain != applied_request:
                     if isinstance(receiver, BandSweep):
@@ -282,35 +293,43 @@ class Sweep:
                     self.capture_gain = radio.get_rx_gain(0)
                     applied_request = gain
                     self.recent_peaks = RecentPeaks()
+                averages = self.requested_averages
+                if not self.args.demo:
+                    if rf.averages != averages:
+                        self.recent_peaks = RecentPeaks()
+                        self.shifted_peaks.clear()
+                    self.capture_averages = averages
                 focus = self.focus
                 if focus is None and self.recent_peaks.region is not None:
                     self.recent_peaks = RecentPeaks()
                 plan = None if self.args.demo else continuous_plan(focus, receiver.rate, receiver.bandwidth)
-                image_region = ((focus, self.capture_gain) if plan is None and self.image_reject_available
+                image_region = ((focus, self.capture_gain, averages) if plan is None and self.image_reject_available
                                 and self.image_reject_requested else None)
                 if image_region != self.image_region:
                     self.image_region = image_region
-                    self.image_reference = None
+                    self.image_references.clear()
                     self.recent_peaks = RecentPeaks()
-                    self.shifted_peaks = RecentPeaks()
+                    self.shifted_peaks.clear()
                 if plan is None:
                     if not self.args.demo:
-                        rf = receiver.receiver if isinstance(receiver, BandSweep) else receiver
                         rf.set_stream_rate(rf.rate)
+                        rf.set_fft_size(FFT_SIZE, averages)
                     leg = None
+                    slot = 0
                     if image_region is not None:
-                        leg = "A" if self.image_reference is None else "B"
-                    layout = (shifted if leg == "B" else centers, offsets, usable)
+                        slot = len(self.image_references)
+                        leg = "ABC"[slot]
+                    layout = plans[slot], offsets, usable
                     self.scan(receiver, focus, paired, layout, leg)
                     self.cache_detail()
                 else:
-                    self.continuous(receiver, focus, plan, gain)
+                    self.continuous(receiver, focus, plan, gain, averages)
             except Exception as error:
                 self.snapshot = dict(self.snapshot, error=str(error), progress=0)
                 receiver = None
                 self.recent_peaks = RecentPeaks()
-                self.shifted_peaks = RecentPeaks()
-                self.image_reference = None
+                self.shifted_peaks.clear()
+                self.image_references.clear()
                 self.image_region = None
                 time.sleep(3)
 
@@ -331,25 +350,23 @@ class Sweep:
         bins[measured] = 10 * np.log10(np.maximum(1e-16, bins[measured]))
         peaks = None
         if focus is not None:
-            history = self.shifted_peaks if leg == "B" else self.recent_peaks
+            history = self.shifted_peaks[leg] if leg in ("B", "C") else self.recent_peaks
             peaks = history.update((low, high), bins, time.perf_counter())
-        pair_detail = b""
-        reference_has_peaks = False
-        if leg == "A":
-            self.image_reference = bins, peaks
-        elif leg == "B":
-            reference, reference_peaks = self.image_reference
-            rejected = minimum_trace(reference, bins)
-            pair_detail = reference.astype("<f4", copy=False).tobytes() + rejected.astype("<f4", copy=False).tobytes()
-            if reference_peaks is not None:
-                pair_detail += reference_peaks.astype("<f4", copy=False).tobytes()
-                reference_has_peaks = True
-            self.image_reference = None
+        image_detail = b""
+        if leg in ("A", "B"):
+            self.image_references.append((bins, peaks))
+        elif leg == "C":
+            a, b = self.image_references
+            rejected = minimum_trace(minimum_trace(a[0], b[0]), bins)
+            # The raw C sweep is served first, followed by the minimum and the two raw references.
+            image_detail = b"".join(trace.astype("<f4", copy=False).tobytes()
+                                    for trace in (rejected, *a, *b) if trace is not None)
+            self.image_references.clear()
         self.publish(bins, peaks, low, high, first * BINS_PER_OVERVIEW, BINS_PER_OVERVIEW,
                      seconds=round(time.perf_counter() - started, 2), hops=len(centers), focus=focus,
-                     image_leg=leg, pair_detail=pair_detail, reference_has_peaks=reference_has_peaks)
+                     image_leg=leg, image_detail=image_detail)
 
-    def continuous(self, receiver, focus, plan, gain):
+    def continuous(self, receiver, focus, plan, gain, averages):
         center, low, high, first, size = plan
         radio = receiver.receiver if isinstance(receiver, BandSweep) else receiver
         full_window = first is None
@@ -395,10 +412,11 @@ class Sweep:
         windows = 0
         gaps = 0
         self.recent_peaks = RecentPeaks()
-        radio.set_fft_size(fft_size)
+        radio.set_fft_size(fft_size, averages)
         radio.start_continuous()
         try:
-            while self.focus == focus and self.requested_gain == gain:
+            while (self.focus == focus and self.requested_gain == gain
+                   and self.requested_averages == averages):
                 if not radio.receive(actual, continuous=True):
                     gaps += 1
                     continue
@@ -420,14 +438,11 @@ class Sweep:
                     self.cache_detail()
                     next_update = now + CONTINUOUS_UPDATE_SECONDS
         finally:
-            try:
-                radio.stop_continuous()
-            finally:
-                radio.set_fft_size(FFT_SIZE)
+            radio.stop_continuous()
 
     def publish(self, bins, peaks, low, high, first, group, seconds, hops,
                 continuous=False, windows=0, gaps=0, focus=None, fft_size=FFT_SIZE, full_window=False,
-                stream_rate=None, image_leg=None, pair_detail=b"", reference_has_peaks=False):
+                stream_rate=None, image_leg=None, image_detail=b""):
         overview = bins.reshape(-1, group).max(axis=1)
         trace = [round(float(value), 1) if np.isfinite(value) else None for value in overview]
         self.snapshot = dict(self.snapshot, trace=trace, number=self.snapshot["number"] + 1, progress=1, error=None,
@@ -435,16 +450,17 @@ class Sweep:
                              rate_hz=stream_rate if stream_rate is not None else getattr(self, "capture_rate", None),
                              bandwidth_hz=getattr(self, "capture_bandwidth", None),
                              master_clock_hz=getattr(self, "master_clock", None),
+                             fft_averages=getattr(self, "capture_averages", None),
                              low=low, high=high, detail_offset=first, detail_count=len(bins),
                              detail=bins.astype("<f4", copy=False).tobytes(),
                              peak_detail=peaks.astype("<f4", copy=False).tobytes() if peaks is not None else b"",
-                             image_leg=image_leg, pair_detail=pair_detail, reference_has_peaks=reference_has_peaks,
+                             image_leg=image_leg, image_detail=image_detail,
                              seconds=seconds, hops=hops, continuous=continuous, windows=windows, gaps=gaps,
                              fft_size=fft_size, full_window=full_window)
 
     def cache_detail(self):
         frame = self.snapshot
-        self.recent_details.append((frame["number"], frame["detail"], frame["peak_detail"], frame["pair_detail"]))
+        self.recent_details.append((frame["number"], frame["detail"], frame["peak_detail"], frame["image_detail"]))
 
 
 def main():
@@ -453,6 +469,8 @@ def main():
     parser.add_argument("--device", default="type=b200,product=B210,num_recv_frames=128", help="UHD device arguments")
     parser.add_argument("--rate", type=float, default=MAX_RATE, help="receive rate in MS/s (default: %(default)s)")
     parser.add_argument("--gain", type=float, default=35, help="receive gain in dB")
+    parser.add_argument("--averages", type=int, default=DEFAULT_AVERAGES,
+                        help="FFT blocks averaged per capture (default: %(default)s)")
     parser.add_argument("--antenna", choices=["RX2", "TX/RX"], default="RX2")
     parser.add_argument("--fpga-band-sweep", nargs="?", type=Path, const=BUNDLED_RETUNE_IMAGE,
                         help="enable Fast Lock with the bundled image or an explicit image path")
@@ -466,6 +484,8 @@ def main():
         parser.error(f"--rate must be between 4 and {MAX_RATE} MS/s")
     if not 0 <= args.gain <= 76:
         parser.error("--gain must be between 0 and 76 dB")
+    if not 1 <= args.averages <= MAX_AVERAGES:
+        parser.error(f"--averages must be between 1 and {MAX_AVERAGES}")
     if args.fpga_band_sweep:
         if args.demo or args.rate != MAX_RATE or not args.fpga_band_sweep.is_file():
             parser.error("--fpga-band-sweep requires an existing image and live 56 MS/s reception")
@@ -487,22 +507,28 @@ def main():
                        for word in words]
 
     gain_stage_data = json.dumps(gain_stages).encode()
-    page = PAGE.read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/":
-                kind, body = "text/html; charset=utf-8", page
+            path = self.path.partition("?")[0]
+            if path == "/":
+                try:
+                    body = (DASHBOARD / "index.html").read_bytes()
+                except FileNotFoundError:
+                    self.send_error(503, "Dashboard not built. Run npm ci and npm run build.")
+                    return
+                kind = "text/html; charset=utf-8"
             elif self.path == "/api/sweep":
                 snapshot = sweep.snapshot
-                frame = {key: value for key, value in snapshot.items() if key not in ("detail", "peak_detail", "pair_detail")}
+                frame = {key: value for key, value in snapshot.items() if key not in ("detail", "peak_detail", "image_detail")}
                 frame["gain_table"] = args.gain_table
                 frame["requested_gain"] = None if args.demo else sweep.requested_gain
+                frame["requested_averages"] = None if args.demo else sweep.requested_averages
                 frame["focus"] = sweep.focus
                 frame["peaks"] = bool(snapshot["peak_detail"])
                 frame["image_reject_available"] = sweep.image_reject_available
                 frame["image_reject_requested"] = sweep.image_reject_requested
-                frame["image_pair"] = bool(snapshot["pair_detail"])
+                frame["image_set"] = bool(snapshot["image_detail"])
                 kind, body = "application/json", json.dumps(frame, allow_nan=False).encode()
             elif self.path == "/api/gain-stages":
                 kind, body = "application/json", gain_stage_data
@@ -510,27 +536,38 @@ def main():
                 path, _, query = self.path.partition("?")
                 frame = sweep.snapshot
                 if path == f"/api/detail/{frame['number']}" and frame["detail"]:
-                    body, peaks, pair = frame["detail"], frame["peak_detail"], frame["pair_detail"]
+                    body, peaks, images = frame["detail"], frame["peak_detail"], frame["image_detail"]
                 else:
-                    cached = next(((data, peaks, pair) for number, data, peaks, pair in sweep.recent_details.copy()
+                    cached = next(((data, peaks, images) for number, data, peaks, images in sweep.recent_details.copy()
                                    if path == f"/api/detail/{number}"), None)
                     if cached is None:
                         self.send_error(404)
                         return
-                    body, peaks, pair = cached
+                    body, peaks, images = cached
                 options = query.split("&")
                 if "peaks=1" in options and peaks:
                     body += peaks
-                if "pair=1" in options and pair:
-                    body += pair
+                if "image=1" in options and images:
+                    body += images
                 kind = "application/octet-stream"
+            elif path.startswith("/assets/"):
+                name = path.removeprefix("/assets/")
+                if not name or name != Path(name).name or name in (".", ".."):
+                    self.send_error(404)
+                    return
+                try:
+                    body = (DASHBOARD / "assets" / name).read_bytes()
+                except (FileNotFoundError, IsADirectoryError):
+                    self.send_error(404)
+                    return
+                kind = mimetypes.guess_type(name)[0] or "application/octet-stream"
             else:
                 self.send_error(404)
                 return
             self.reply(kind, body)
 
         def do_POST(self):
-            if self.path not in ("/api/focus", "/api/gain", "/api/image-reject"):
+            if self.path not in ("/api/focus", "/api/gain", "/api/averages", "/api/image-reject"):
                 self.send_error(404)
                 return
             try:
@@ -550,6 +587,12 @@ def main():
                     sweep.requested_gain = value
                     self.reply("application/json", json.dumps(value).encode())
                     return
+                if self.path == "/api/averages":
+                    if args.demo or type(value) is not int or not 1 <= value <= MAX_AVERAGES:
+                        raise ValueError
+                    sweep.requested_averages = value
+                    self.reply("application/json", json.dumps(value).encode())
+                    return
                 focus = value
                 if focus is not None:
                     if (not isinstance(focus, list) or len(focus) != 2
@@ -560,6 +603,7 @@ def main():
             except (ValueError, UnicodeError):
                 messages = {
                     "/api/gain": "Expected live RX gain from 0 to 76 dB",
+                    "/api/averages": f"Expected an integer from 1 to {MAX_AVERAGES} on a live receiver",
                     "/api/focus": "Expected a frequency range in Hz or null",
                     "/api/image-reject": "Image rejection requires a live paired sweep at 56 MS/s and a boolean value",
                 }

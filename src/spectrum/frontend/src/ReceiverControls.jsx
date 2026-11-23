@@ -1,0 +1,156 @@
+import {useEffect, useRef, useState} from 'react';
+import {fetchGainStages, writeReceiverSetting} from './receiverApi.js';
+
+export function useReceiverSetting(endpoint, field, confirmSetting, failureMessage) {
+  const request = useRef(null);
+  const [pendingValue, setPendingValue] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => () => request.current?.abort(), []);
+
+  async function save(value) {
+    if (request.current) return false;
+    const controller = new AbortController();
+    request.current = controller;
+    setError(null);
+    setPendingValue(value);
+    try {
+      const confirmed = await writeReceiverSetting(endpoint, value, controller.signal);
+      if (controller.signal.aborted) return false;
+      confirmSetting(field, confirmed);
+      return true;
+    } catch {
+      if (!controller.signal.aborted) setError(failureMessage);
+      return false;
+    } finally {
+      request.current = null;
+      if (!controller.signal.aborted) setPendingValue(null);
+    }
+  }
+
+  return {pendingValue, error, save};
+}
+
+function GainStageReadout({gain, table}) {
+  const [stages, setStages] = useState(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (table !== 'unified') return;
+    const controller = new AbortController();
+    const {signal} = controller;
+    fetchGainStages(signal).then(rows => {
+      if (signal.aborted) return;
+      setStages(rows);
+      setFailed(false);
+    }).catch(() => { if (!signal.aborted) setFailed(true); });
+    return () => controller.abort();
+  }, [table]);
+
+  if (table !== 'unified') return null;
+  if (failed) return <div id="gain-stages" role="status">Gain-stage readout unavailable</div>;
+  const values = stages?.[Math.trunc(gain)];
+  if (!values) return null;
+
+  const [lna, mixer, tia, lpf] = values;
+  // AD9361 UG-570, tables 27–30. LNA and mixer gain vary with frequency.
+  const nominal = [[3, 14, 17, 21][lna], mixer < 3 ? [0, 3, 9][mixer] : mixer + 11, [-6, 0][tia], lpf];
+  return (
+    <div
+      id="gain-stages" aria-label="Unified gain-table stages, nominal gain at 2.3 GHz"
+      title="Stage indices and nominal gains from AD9361 UG-570. Actual gain varies with frequency."
+    >
+      {['LNA', 'Mixer', 'TIA', 'LPF'].map((name, index) => (
+        <span key={name}>{name} <output htmlFor="gain">{values[index]} ({nominal[index]} dB)</output></span>
+      ))}
+      <span>Nominal at 2.3 GHz</span>
+    </div>
+  );
+}
+
+const GAIN_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', 'Enter'];
+
+function GainControl({requested, table, setting}) {
+  const [draft, setDraft] = useState(null);
+  const value = draft ?? requested;
+
+  async function commit() {
+    if (draft === null || draft === requested) {
+      setDraft(null);
+      return;
+    }
+    if (await setting.save(draft)) setDraft(null);
+  }
+
+  return (
+    <>
+      <label id="gain-control">
+        RX gain
+        <input
+          id="gain" type="range" min="0" max="76" step="1" value={value}
+          disabled={setting.pendingValue !== null}
+          aria-describedby={setting.error ? 'detail' : undefined}
+          onChange={event => setDraft(event.currentTarget.valueAsNumber)}
+          onPointerUp={commit} onBlur={commit}
+          onKeyUp={event => { if (GAIN_KEYS.includes(event.key)) void commit(); }}
+        />
+        <output id="gain-value" htmlFor="gain" aria-live="off">{value} dB</output>
+      </label>
+      <GainStageReadout table={table} gain={value} />
+    </>
+  );
+}
+
+function AveragesControl({requested, setting}) {
+  const [draft, setDraft] = useState(null);
+  const [validationError, setValidationError] = useState(null);
+  const error = validationError || setting.error;
+
+  async function commit(input) {
+    if (draft === null) return;
+    if (!input.validity.valid) {
+      setValidationError('Enter a whole number from 1 to 32 for FFT averages.');
+      return;
+    }
+    setValidationError(null);
+    if (input.valueAsNumber === requested || await setting.save(input.valueAsNumber)) setDraft(null);
+  }
+
+  return (
+    <div>
+      <label id="averages-control" title="Number of FFT blocks averaged per capture">
+        FFT averages{' '}
+        <input
+          id="averages" type="number" min="1" max="32" step="1" required value={draft ?? requested}
+          disabled={setting.pendingValue !== null}
+          aria-invalid={validationError ? true : undefined} aria-describedby={error ? 'averages-error' : undefined}
+          onChange={event => { setDraft(event.currentTarget.value); setValidationError(null); }}
+          onBlur={event => void commit(event.currentTarget)}
+          onKeyDown={event => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            void commit(event.currentTarget);
+          }}
+        />
+      </label>
+      {error && <p id="averages-error" className="input-error" role="status">{error}</p>}
+    </div>
+  );
+}
+
+export function ReceiverControls({latest, gain, averages, canReset, resetRange}) {
+  return (
+    <header>
+      <div>
+        {latest?.requested_gain != null && (
+          <GainControl requested={latest.requested_gain} table={latest.gain_table} setting={gain} />
+        )}
+      </div>
+      <div className="view-controls">
+        {latest?.requested_averages != null && (
+          <AveragesControl requested={latest.requested_averages} setting={averages} />
+        )}
+        <button id="full-spectrum" type="button" disabled={!canReset} onClick={resetRange}>Full spectrum</button>
+      </div>
+    </header>
+  );
+}
