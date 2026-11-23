@@ -2,6 +2,8 @@
 
 A receive-only web dashboard for the **Kintex-7 B210 clone** identified by UHD as `Custom_SDR_B210` (`type=b200,product=B210`). It sweeps 70 MHz–6 GHz and switches to continuous capture when the zoom fits within 56 MHz.
 
+![B210 dashboard showing a 1.54–3.00 GHz spectrum sweep above its waterfall history](docs/dashboard.webp)
+
 Before loading the bundled FPGA image, verify that your board matches the `xc7k325tffg676-2` FPGA and pinout in the [clone schematic](docs/hardware-schematic/USRP_B210.pdf).
 
 ## Run the dashboard
