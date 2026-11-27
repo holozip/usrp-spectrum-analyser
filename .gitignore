@@ -26,3 +26,7 @@
 /playwright-report/
 /test-results/
 __pycache__/
+
+# Local Graphify environment, caches and generated graph outputs.
+/.graphify/
+/graphify-out/

@@ -1,0 +1,23 @@
+# Keep credentials and local tooling out of the project graph.
+.aws/
+.agents/
+.codex/
+.opencode/
+.graphify/
+graphify-out/
+AGENTS.md
+opencode.jsonc
+
+# Dependencies, generated builds and test artefacts.
+node_modules/
+build/
+test-results/
+playwright-report/
+__pycache__/
+
+# Generated Xilinx simulation internals: module references may remain unresolved.
+src/firmware/ip/hbdec1.v
+src/firmware/ip/hbdec2.v
+
+# Do not exclude rtl/sim/: axi_fifo_2clk_sim.v is also a synthesis source.
+# Keep Markdown, screenshots and PDFs; CAD and firmware binaries are unsupported.

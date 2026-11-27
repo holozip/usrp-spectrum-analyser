@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "graphify": {
+        "type": "local",
+        "command": ["./.graphify/venv/bin/graphify-mcp", "graphify-out/graph.json"],
+        "cwd": ".",
+        "environment": {
+          "GRAPHIFY_BACKEND": "none"
+        }
+      }
+    }
+  },
+  "permissions": [
+    { "action": "graphify_list_prs", "resource": "*", "effect": "deny" },
+    { "action": "graphify_get_pr_impact", "resource": "*", "effect": "deny" },
+    { "action": "graphify_triage_prs", "resource": "*", "effect": "deny" }
+  ]
+}
