@@ -14,7 +14,7 @@ export default defineConfig({
     launchOptions: {executablePath: process.env.SPECTRUM_BROWSER_PATH || undefined},
   },
   webServer: {
-    command: `python3 src/spectrum/server.py --demo --port ${port}`,
+    command: `python3 src/spectrum/server.py --demo --port ${port} --bookmarks-file :memory:`,
     url: origin,
     reuseExistingServer: false,
   },

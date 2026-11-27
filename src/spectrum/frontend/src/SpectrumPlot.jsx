@@ -2,6 +2,8 @@ import {useLayoutEffect, useRef, useState} from 'react';
 import {useChartWheel, watchPixelRatio, wheelZoom} from './chartEvents.js';
 import {drawSpectrum} from './drawSpectrum.js';
 import {clamp, DEFAULT_POWER, frequencyLabel, LEFT_MARGIN} from './spectrumData.js';
+import {BookmarkFlags} from './BookmarkFlags.jsx';
+import {BookmarkSelection} from './BookmarkSelection.jsx';
 
 const MIN_POWER = -160;
 const MAX_POWER = 20;
@@ -93,10 +95,11 @@ function PowerAxis({layout, power, setPower, clearCursor}) {
   );
 }
 
-export function SpectrumPlot({toolsRef, data, view, gestures}) {
+export function SpectrumPlot({toolsRef, data, view, gestures, bookmarks, inspectBookmarks, bookmarkSelection}) {
   const plot = useRef(null);
   const [power, setPower] = useState(DEFAULT_POWER);
   const [layout, setLayout] = useState({width: 0, height: 0, scale: 1, top: 0});
+  const bookmarksVisible = bookmarks != null;
 
   useLayoutEffect(() => {
     const canvas = plot.current;
@@ -117,14 +120,14 @@ export function SpectrumPlot({toolsRef, data, view, gestures}) {
       observer.disconnect();
       stopWatching();
     };
-  }, [toolsRef]);
+  }, [toolsRef, bookmarksVisible]);
 
   const {cursor, selection} = gestures;
   useLayoutEffect(() => {
     drawSpectrum(plot.current, layout, data, view, power, cursor, selection);
   }, [layout, data, view, power, cursor, selection]);
 
-  useChartWheel(plot, event => gestures.wheel(event, true));
+  useChartWheel(plot, event => {if (!bookmarkSelection) gestures.wheel(event, true);});
   const fine = data.high - data.low < 20e6;
   const band = view ? frequencyLabel(data.low, fine) + ' to ' + frequencyLabel(data.high, fine) : '70 MHz to 6 GHz';
   return (
@@ -136,9 +139,13 @@ export function SpectrumPlot({toolsRef, data, view, gestures}) {
         tabIndex={0}
         aria-label={'Received power in dBFS across ' + band}
         aria-describedby="frequency-keys"
-        {...gestures.surfaceHandlers('spectrum')}
+        {...(bookmarkSelection ? {onKeyDown: event => {
+          if (event.key === 'Escape') bookmarkSelection.cancel();
+        }} : gestures.surfaceHandlers('spectrum'))}
       />
       <PowerAxis layout={layout} power={power} setPower={setPower} clearCursor={() => gestures.setCursor(null)} />
+      {bookmarks && <BookmarkFlags bookmarks={bookmarks} data={data} layout={layout} power={power} inspect={inspectBookmarks} />}
+      {bookmarkSelection && <BookmarkSelection {...bookmarkSelection} data={data} layout={layout} />}
     </>
   );
 }

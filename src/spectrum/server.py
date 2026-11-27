@@ -2,6 +2,7 @@
 import argparse
 import json
 import mimetypes
+import sqlite3
 import threading
 import time
 from collections import defaultdict, deque
@@ -11,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from fpga_sweep import BandSweep
+from bookmarks import BookmarkAPI, BookmarkStore, default_bookmark_path
 
 LOW, HIGH = 70e6, 6e9
 MAX_RATE = 56
@@ -241,6 +243,8 @@ class Sweep:
     def __init__(self, args):
         self.args = args
         self.focus = None
+        self.navigation_lock = threading.Lock()
+        self.navigation_revision = 0
         self.requested_gain = args.gain
         self.requested_averages = args.averages
         self.capture_gain = None
@@ -479,6 +483,8 @@ def main():
     parser.add_argument("--gain-table", choices=["stock", "unified"], default="stock",
                         help="receive gain table (unified requires a compatible FPGA sweep image)")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--bookmarks-file", default=default_bookmark_path(),
+                        help="bookmark SQLite file (default: %(default)s); :memory: for an isolated demo")
     args = parser.parse_args()
     if not 4 <= args.rate <= MAX_RATE:
         parser.error(f"--rate must be between 4 and {MAX_RATE} MS/s")
@@ -508,8 +514,10 @@ def main():
 
     gain_stage_data = json.dumps(gain_stages).encode()
 
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(BookmarkAPI, BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.handle_bookmarks():
+                return
             path = self.path.partition("?")[0]
             if path == "/":
                 try:
@@ -524,7 +532,9 @@ def main():
                 frame["gain_table"] = args.gain_table
                 frame["requested_gain"] = None if args.demo else sweep.requested_gain
                 frame["requested_averages"] = None if args.demo else sweep.requested_averages
-                frame["focus"] = sweep.focus
+                with sweep.navigation_lock:
+                    frame["focus"] = sweep.focus
+                    frame["navigation_revision"] = sweep.navigation_revision
                 frame["peaks"] = bool(snapshot["peak_detail"])
                 frame["image_reject_available"] = sweep.image_reject_available
                 frame["image_reject_requested"] = sweep.image_reject_requested
@@ -567,6 +577,8 @@ def main():
             self.reply(kind, body)
 
         def do_POST(self):
+            if self.handle_bookmarks():
+                return
             if self.path not in ("/api/focus", "/api/gain", "/api/averages", "/api/image-reject"):
                 self.send_error(404)
                 return
@@ -609,7 +621,8 @@ def main():
                 }
                 self.send_error(400, messages[self.path])
                 return
-            sweep.focus = focus
+            with sweep.navigation_lock:
+                sweep.focus = focus
             self.reply("application/json", json.dumps(focus).encode())
 
         def reply(self, kind, body):
@@ -623,13 +636,22 @@ def main():
         def log_message(self, *_args):
             pass
 
-    with ThreadingHTTPServer(("127.0.0.1", args.port), Handler) as server:
-        sweep = Sweep(args)
-        print(f"Spectrum dashboard: http://127.0.0.1:{server.server_port}", flush=True)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
+    try:
+        bookmarks = BookmarkStore(args.bookmarks_file)
+    except (OSError, ValueError, sqlite3.Error) as error:
+        parser.error(f"cannot open bookmark storage: {error}")
+    try:
+        with ThreadingHTTPServer(("127.0.0.1", args.port), Handler) as server:
+            sweep = Sweep(args)
+            Handler.bookmark_store = bookmarks
+            Handler.receiver_state = sweep
+            print(f"Spectrum dashboard: http://127.0.0.1:{server.server_port}", flush=True)
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+    finally:
+        bookmarks.close()
 
 
 if __name__ == "__main__":

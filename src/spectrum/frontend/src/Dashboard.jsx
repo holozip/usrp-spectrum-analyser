@@ -1,9 +1,13 @@
-import {useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
+import {BookmarkPanel} from './BookmarkPanel.jsx';
 import {ReceiverControls, useReceiverSetting} from './ReceiverControls.jsx';
 import {SpectrumPanel} from './SpectrumPanel.jsx';
 import {FULL_RANGE, sameRange} from './spectrumData.js';
 import {useFocusRequest} from './useFocusRequest.js';
 import {useSweep} from './useSweep.js';
+import {useBookmarks} from './useBookmarks.js';
+import {observeBookmarkNavigation} from './bookmarkNavigation.js';
+import {newBookmarkDraft} from './bookmarkSelection.js';
 
 function connectionStatus(latest, frozen, disconnected) {
   if (disconnected) return 'Disconnected · Retrying';
@@ -52,6 +56,26 @@ export default function Dashboard() {
   const sweep = useSweep(localView);
   const {latest, shown, view, frozen, disconnected, toggleFreeze, confirmSetting} = sweep;
   const focus = useFocusRequest();
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [selectedBookmarks, setSelectedBookmarks] = useState(null);
+  const [bookmarkDraft, setBookmarkDraft] = useState(null);
+  const bookmarks = useBookmarks(bookmarksOpen);
+  const navigationRevision = useRef(undefined);
+  const localNavigation = useRef(0);
+  const toggleButton = useRef(null);
+  const revision = latest?.navigation_revision;
+  const receiverFocus = latest?.focus;
+  const cancelFocusDelay = focus.cancelDelay;
+
+  useEffect(() => {
+    // The initial revision is historical: retain the connection's normal focus.
+    const observed = observeBookmarkNavigation(navigationRevision.current, revision);
+    navigationRevision.current = observed.revision;
+    if (observed.recall) {
+      cancelFocusDelay();
+      previewRange(receiverFocus ?? null);
+    }
+  }, [revision, receiverFocus, cancelFocusDelay]);
   const gain = useReceiverSetting('gain', 'requested_gain', confirmSetting,
     'Could not change RX gain. Adjust the slider or press Enter to retry.');
   const averages = useReceiverSetting('averages', 'requested_averages', confirmSetting,
@@ -69,9 +93,52 @@ export default function Dashboard() {
   const error = latest?.error || focus.error || gain.error || imageSetting.error;
 
   function commitRange(range, delay) {
+    localNavigation.current++;
     previewRange(range);
     focus.request(range, delay);
   }
+
+  async function tuneBookmark(bookmark) {
+    const started = localNavigation.current;
+    await focus.settle();
+    // A later local gesture wins, including at the receiver: do not send a
+    // superseded recall merely because an older focus request finally settled.
+    if (started !== localNavigation.current) return;
+    const sentRevision = navigationRevision.current;
+    const span = view ? view[1] - view[0] : Infinity;
+    const result = await bookmarks.mutate('/' + encodeURIComponent(bookmark.id) + '/tune', 'POST',
+      bookmark.bandwidth_hz != null ? {} : {span_hz: span <= 56e6 ? span : 2e6});
+    // A newer observed recall can supersede this response, but a counter that
+    // reset while reconnecting must not make a successful new recall obsolete.
+    if (navigationRevision.current !== sentRevision && result.navigation_revision < navigationRevision.current) return;
+    navigationRevision.current = result.navigation_revision;
+    // Prevent an older sweep GET undoing this confirmed recall.
+    confirmSetting('navigation_revision', result.navigation_revision);
+    confirmSetting('focus', result.focus);
+    if (started === localNavigation.current) previewRange(result.focus);
+  }
+
+  function closeBookmarks() {
+    if (bookmarkDraft?.saving) return;
+    setBookmarkDraft(null);
+    setBookmarksOpen(false);
+    toggleButton.current?.focus();
+  }
+
+  function editBookmark(bookmark = null, selecting = false) {
+    const range = view ?? FULL_RANGE;
+    setBookmarkDraft({...newBookmarkDraft(bookmark, (range[0] + range[1]) / 2), selecting: selecting || Boolean(bookmark)});
+    setBookmarksOpen(true);
+    setSelectedBookmarks(null);
+  }
+
+  function changeBookmarkDraft(fields) {
+    setBookmarkDraft(previous => previous ? {...previous, ...fields} : previous);
+  }
+
+  const bookmarkSelection = bookmarkDraft?.selecting && !bookmarkDraft.saving ? {
+    draft: bookmarkDraft, change: changeBookmarkDraft, cancel: () => setBookmarkDraft(null),
+  } : null;
 
   return (
     <main>
@@ -79,11 +146,21 @@ export default function Dashboard() {
         latest={latest} gain={gain} averages={averages} canReset={view !== null || Boolean(focus.error)}
         resetRange={() => commitRange(null)}
       />
+      <div className={'spectrum-workspace' + (bookmarksOpen ? ' bookmarks-open' : '')}>
       <SpectrumPanel
         latest={latest} shown={shown} view={view} frozen={frozen} status={connectionStatus(latest, frozen, disconnected)}
         toggleFreeze={toggleFreeze} previewRange={previewRange} commitRange={commitRange}
         cancelFocusDelay={focus.cancelDelay} image={image}
+        bookmarks={bookmarksOpen ? bookmarks.bookmarks : null}
+        bookmarkTools={{open: bookmarksOpen, toggle: () => bookmarksOpen ? closeBookmarks() : setBookmarksOpen(true),
+          ref: toggleButton, select: () => bookmarkDraft ? changeBookmarkDraft({selecting: true}) : editBookmark(null, true)}}
+        bookmarkSelection={bookmarkSelection}
+        inspectBookmarks={ids => setSelectedBookmarks(ids)}
       />
+      {bookmarksOpen && <BookmarkPanel store={bookmarks} close={closeBookmarks}
+        draft={bookmarkDraft} changeDraft={changeBookmarkDraft} edit={editBookmark} cancelDraft={() => setBookmarkDraft(null)}
+        tune={tuneBookmark} selectedIds={selectedBookmarks} showAll={() => setSelectedBookmarks(null)} />}
+      </div>
       <footer>
         <p id="detail">{error || detailStatus(sweep, gain, averages, imageEnabled)}</p>
         <span className="visually-hidden" role="status">{error}</span>

@@ -46,6 +46,46 @@ Vivado is needed only to rebuild the image. To install a system-wide copy, run `
 - The sweep uses 56 MS/s, 56 MHz analog bandwidth, and a 16,384-point FFT by default. FFT spacing is 3.42 kHz. The stitched sweep's finest display bins are 3.77 kHz. Continuous views at 2 MHz or narrower decimate to 14 MS/s and use a 32,768-point FFT (427 Hz spacing). At 500 kHz or narrower, a 65,536-point FFT gives 214 Hz spacing. The master clock and analog bandwidth stay at 56 MHz.
 - **FFT averages** sets the number of FFT blocks averaged per capture, from 1 to 32. The default is 8. Higher counts smooth the noise floor and take longer to capture. Use `--averages N` to set the starting value.
 
+## Signal bookmarks
+
+Use **Bookmark signal** on the spectrum to select a signal without retuning:
+click its centre or drag across its width, then adjust the shaded band's
+centre and edge markers. The frequency and bandwidth fields stay in sync
+with the markers. Add a title, modulation, tag and notes, then save. Manual
+entry remains available in the **Bookmarks** panel; Escape cancels selection
+and restores ordinary chart gestures.
+
+The panel lists bookmarks in a table with frequency, title, modulation,
+bandwidth and tag, plus explicit **Tune**, **Edit** and **Delete** actions.
+Tune uses the saved bandwidth to show the signal with surrounding context;
+entries without bandwidth retain the previous span behaviour. Merely
+selecting, saving or editing a signal does not tune the receiver. Modulation
+and bandwidth are descriptive metadata, not demodulator/filter settings.
+
+While the panel is open, visible bookmarked frequencies are flagged on the
+spectrum. Flags follow the displayed trace and are arranged to avoid label
+overlap; dense groups remain accessible without covering one another.
+
+Bookmarks are stored by the receiver server, survive restarts and are
+shared with AI clients—not kept in browser storage. The default database is
+`~/.local/share/usrp-spectrum-analyser/bookmarks.sqlite3` (or under
+`$XDG_DATA_HOME`). Override it with `--bookmarks-file PATH`; use
+`--bookmarks-file :memory:` for a disposable demo.
+
+**Local AI/API access:** the analyser already exposes receiver status and
+controls. Bookmark CRUD and explicit recall are available under
+`/api/bookmarks`; AI-added entries appear in the open panel, and recall also
+navigates an already-open dashboard. See [API routes, schemas and examples](docs/api.md).
+No authentication or remote access is added: the server stays on loopback.
+
+The interaction follows established SDR conventions: Gqrx documents a
+[shaded passband with draggable edges](https://www.gqrx.dk/doc/practical-tricks-and-tips),
+and its [bookmark table](https://github.com/gqrx-sdr/gqrx/blob/master/src/qtgui/bookmarkstablemodel.cpp)
+includes frequency, name, modulation, bandwidth and tag. This analyser uses
+those interaction ideas for annotation, not Gqrx demodulation or file-format
+compatibility. Existing bookmark databases retain their records when the
+new fields are added.
+
 ## Receiver options
 
 - The default paired plan uses 208 hops at 56 MS/s. Use `--hop-plan uniform` to select the 311-hop plan. [Measured performance](docs/firmware-build.md#measured-performance)
@@ -74,9 +114,10 @@ Start the Python demo or live receiver in one terminal, then run `npm run dev` i
 | `npm run build` | Build the assets served by Python. |
 | `npm run preview` | Preview the build through Vite with the same API proxy. |
 | `npm run lint` | Check JavaScript, JSX and React hook dependencies. |
-| `npm test` | Test range logic, binary trace decoding and trace selection. |
+| `npm test` | Test range logic, binary trace decoding, trace selection and bookmark flag placement. |
+| `python3 -m unittest discover -s src/spectrum/tests -p 'test_*.py' -v` | Test bookmark persistence, validation, concurrent writes and HTTP operations without a radio. |
 | `npx playwright install chromium` | Install Chromium for the browser tests. |
-| `npm run test:browser` | Test a fresh production build after running `npm run build`. The suite starts its own Python demo on port 18742. |
+| `npm run test:browser` | Test a fresh production build after running `npm run build`. The suite starts its own Python demo with an isolated in-memory bookmark database on port 18742. |
 
 Set `SPECTRUM_BROWSER_PATH` when running the browser tests to use a compatible local Chromium executable.
 

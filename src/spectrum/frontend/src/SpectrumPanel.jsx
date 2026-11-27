@@ -5,9 +5,17 @@ import {Waterfall} from './Waterfall.jsx';
 import {selectSpectrumData, spectrumReadout} from './spectrumData.js';
 import {useFrequencyGestures} from './useFrequencyGestures.js';
 
-function CaptureTools({toolsRef, peakHold, setPeakHold, rejected, frozen, toggleFreeze, image}) {
+function CaptureTools({toolsRef, peakHold, setPeakHold, rejected, frozen, toggleFreeze, image, bookmarkTools}) {
   return (
     <div className="capture-tools" id="capture-tools" ref={toolsRef} role="group" aria-label="Capture tools">
+      <button
+        ref={bookmarkTools.ref} id="bookmarks-toggle" type="button" aria-expanded={bookmarkTools.open}
+        aria-controls="bookmarks-panel" aria-pressed={bookmarkTools.open} onClick={bookmarkTools.toggle}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21V3h13l-3 5 3 5H6" /></svg>
+        <span>Bookmarks</span>
+      </button>
+      <button type="button" onClick={bookmarkTools.select}>Bookmark signal</button>
       <button
         id="peak-hold" type="button" aria-pressed={peakHold} disabled={rejected}
         title={rejected ? 'Peak hold is available on raw traces' : 'Peak hold'}
@@ -37,6 +45,7 @@ function CaptureTools({toolsRef, peakHold, setPeakHold, rejected, frozen, toggle
 
 export function SpectrumPanel({
   latest, shown, view, frozen, toggleFreeze, status, previewRange, commitRange, cancelFocusDelay, image,
+  bookmarks, bookmarkTools, inspectBookmarks, bookmarkSelection,
 }) {
   const panel = useRef(null);
   const plotWindow = useRef(null);
@@ -77,9 +86,10 @@ export function SpectrumPanel({
       <div id="capture-window" ref={plotWindow}>
         <CaptureTools
           toolsRef={tools} peakHold={peakHold} setPeakHold={setPeakHold} rejected={data.rejected}
-          frozen={frozen} toggleFreeze={toggleFreeze} image={{...image, toggle: toggleImage}}
+          frozen={frozen} toggleFreeze={toggleFreeze} image={{...image, toggle: toggleImage}} bookmarkTools={bookmarkTools}
         />
-        <SpectrumPlot toolsRef={tools} data={data} view={view} gestures={gestures} />
+        <SpectrumPlot toolsRef={tools} data={data} view={view} gestures={gestures}
+          bookmarks={bookmarks} inspectBookmarks={inspectBookmarks} bookmarkSelection={bookmarkSelection} />
       </div>
       <PanelDivider panel={panel} plotWindow={plotWindow} setShare={setShare} />
       <Waterfall shown={shown} data={data} view={view} frozen={frozen} gestures={gestures} />

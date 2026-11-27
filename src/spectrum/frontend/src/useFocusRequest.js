@@ -7,11 +7,12 @@ export function useFocusRequest() {
   const connection = useRef(null);
 
   useEffect(() => {
-    const session = {controller: new AbortController(), timer: undefined, queued: undefined, sending: false};
+    const session = {controller: new AbortController(), timer: undefined, queued: undefined, sending: false, waiters: []};
     connection.current = session;
     return () => {
       clearTimeout(session.timer);
       session.controller.abort();
+      session.waiters.forEach(resolve => resolve());
       connection.current = null;
     };
   }, []);
@@ -42,11 +43,20 @@ export function useFocusRequest() {
         }
       }
       session.sending = false;
+      session.waiters.splice(0).forEach(resolve => resolve());
     }
 
     if (delay) session.timer = setTimeout(sendLatest, delay);
     else void sendLatest();
   }
 
-  return {request, cancelDelay, error};
+  async function settle() {
+    cancelDelay();
+    const session = connection.current;
+    if (!session) return;
+    session.queued = undefined;
+    if (session.sending) await new Promise(resolve => session.waiters.push(resolve));
+  }
+
+  return {request, cancelDelay, settle, error};
 }
