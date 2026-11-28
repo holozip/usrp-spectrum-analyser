@@ -11,7 +11,7 @@ function pointerPosition(event, surface, isSpectrum) {
   return {fraction: (event.clientX - bounds.left - left) / width, width};
 }
 
-export function useFrequencyGestures({view, shown, previewRange, commitRange, cancelFocusDelay}) {
+export function useFrequencyGestures({view, shown, previewRange, commitRange, cancelFocusDelay, tuneAt}) {
   const [cursor, setCursor] = useState(null);
   const [selection, setSelection] = useState(null);
   const [panningSurface, setPanningSurface] = useState(null);
@@ -128,6 +128,8 @@ export function useFrequencyGestures({view, shown, previewRange, commitRange, ca
       } else if (!active.selecting && active.moved) {
         const shift = (active.fraction - point.fraction) * (high - low);
         commit(low + shift, high + shift);
+      } else if (tuneAt && !active.selecting && point.fraction >= 0 && point.fraction <= 1) {
+        tuneAt(low + point.fraction * (high - low));
       } else {
         commitRange(view);
       }

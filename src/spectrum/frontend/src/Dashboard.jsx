@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from 'react';
+import {useEffect, useEffectEvent, useRef, useState} from 'react';
 import {BookmarkPanel} from './BookmarkPanel.jsx';
 import {antennaLabel, ReceiverControls, useReceiverSetting} from './ReceiverControls.jsx';
 import {SpectrumPanel} from './SpectrumPanel.jsx';
@@ -8,6 +8,7 @@ import {useSweep} from './useSweep.js';
 import {useBookmarks} from './useBookmarks.js';
 import {observeBookmarkNavigation} from './bookmarkNavigation.js';
 import {newBookmarkDraft} from './bookmarkSelection.js';
+import {bookmarkChannelSetting, ChannelPanel, useChannelReceiver} from './ChannelPanel.jsx';
 
 function connectionStatus(latest, frozen, disconnected) {
   if (disconnected) return 'Disconnected · Retrying';
@@ -43,7 +44,9 @@ function detailStatus({latest, shown, frozen, view}, antenna, gain, averages, im
   }
   if (gain.pendingValue !== null || (!latest.demo && latest.gain != null
       && latest.gain !== Math.trunc(latest.requested_gain))) return 'Applying RX gain…';
-  if (latest.number && !frozen && !sameRange(latest.capture_focus, view)) return 'Updating frequency range…';
+  if (latest.number && !frozen && !latest.listen?.settings && !sameRange(latest.capture_focus, view)) {
+    return 'Updating frequency range…';
+  }
   if (averages.pendingValue !== null || (latest.fft_averages != null
       && latest.fft_averages !== latest.requested_averages)) return 'Applying FFT averages…';
 
@@ -59,17 +62,26 @@ export default function Dashboard() {
   const [localView, previewRange] = useState(undefined);
   const sweep = useSweep(localView);
   const {latest, shown, view, frozen, disconnected, toggleFreeze, confirmSetting} = sweep;
+  const channel = useChannelReceiver(latest?.listen, confirmSetting, view, latest?.focus);
   const focus = useFocusRequest();
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [selectedBookmarks, setSelectedBookmarks] = useState(null);
   const [bookmarkDraft, setBookmarkDraft] = useState(null);
+  const [bookmarkBusy, setBookmarkBusy] = useState(false);
+  const [bookmarkError, setBookmarkError] = useState(null);
   const bookmarks = useBookmarks(bookmarksOpen);
   const navigationRevision = useRef(undefined);
   const localNavigation = useRef(0);
-  const toggleButton = useRef(null);
+  const bookmarksToggle = useRef(null);
+  const channelToggle = useRef(null);
   const revision = latest?.navigation_revision;
   const receiverFocus = latest?.focus;
   const cancelFocusDelay = focus.cancelDelay;
+  const selectRecalledChannel = useEffectEvent(() => {
+    if (latest?.bookmark_channel && channel.state?.available) {
+      channel.selectBookmark(latest.bookmark_channel, latest.listen.revision);
+    }
+  });
 
   useEffect(() => {
     // The initial revision is historical: retain the connection's normal focus.
@@ -78,6 +90,7 @@ export default function Dashboard() {
     if (observed.recall) {
       cancelFocusDelay();
       previewRange(receiverFocus ?? null);
+      selectRecalledChannel();
     }
   }, [revision, receiverFocus, cancelFocusDelay]);
   const antenna = useReceiverSetting('antenna', 'requested_antenna', confirmSetting,
@@ -104,7 +117,27 @@ export default function Dashboard() {
     focus.request(range, delay);
   }
 
+  async function stopListening(full = false) {
+    if (!full) {
+      await channel.configure(null);
+      return;
+    }
+    await focus.settle();
+    const result = await channel.configure({stop: 'full'});
+    if (result) {
+      localNavigation.current++;
+      confirmSetting('focus', result.survey_focus);
+      previewRange(result.survey_focus);
+    }
+  }
+
+  function listenToBookmark(bookmark) {
+    channel.setOpen(true);
+    void channel.configure(bookmarkChannelSetting(bookmark), true);
+  }
+
   async function tuneBookmark(bookmark) {
+    channel.cancelEdits();
     const started = localNavigation.current;
     await focus.settle();
     // A later local gesture wins, including at the receiver: do not send a
@@ -121,14 +154,40 @@ export default function Dashboard() {
     // Prevent an older sweep GET undoing this confirmed recall.
     confirmSetting('navigation_revision', result.navigation_revision);
     confirmSetting('focus', result.focus);
-    if (started === localNavigation.current) previewRange(result.focus);
+    if (result.channel) confirmSetting('bookmark_channel', result.channel);
+    if (result.listen) confirmSetting('listen', result.listen);
+    if (started === localNavigation.current) {
+      previewRange(result.focus);
+      if (result.channel && result.listen?.available) channel.selectBookmark(result.channel, result.listen.revision);
+    }
+  }
+
+  async function performBookmarkAction(action, errorMessage) {
+    if (bookmarkBusy) return false;
+    setBookmarkBusy(true);
+    setBookmarkError(null);
+    try {
+      await action();
+      return true;
+    } catch (failure) {
+      setBookmarkError(`${errorMessage}: ${failure.message}. Try again.`);
+      return false;
+    } finally {
+      setBookmarkBusy(false);
+    }
   }
 
   function closeBookmarks() {
     if (bookmarkDraft?.saving) return;
     setBookmarkDraft(null);
+    setBookmarkError(null);
     setBookmarksOpen(false);
-    toggleButton.current?.focus();
+    bookmarksToggle.current?.focus();
+  }
+
+  function closeChannel() {
+    channel.setOpen(false);
+    channelToggle.current?.focus();
   }
 
   function editBookmark(bookmark = null, selecting = false) {
@@ -145,27 +204,45 @@ export default function Dashboard() {
   const bookmarkSelection = bookmarkDraft?.selecting && !bookmarkDraft.saving ? {
     draft: bookmarkDraft, change: changeBookmarkDraft, cancel: () => setBookmarkDraft(null),
   } : null;
+  const bookmarkActions = {
+    inspect: setSelectedBookmarks,
+    tune: bookmark => performBookmarkAction(() => tuneBookmark(bookmark), 'Could not tune to bookmark'),
+    remove: bookmark => performBookmarkAction(() => bookmarks.mutate('/' + encodeURIComponent(bookmark.id), 'DELETE'),
+      'Could not delete bookmark'),
+    busy: bookmarkBusy,
+    error: bookmarkError,
+    tuneDisabled: bookmarkBusy || Boolean(bookmarkDraft?.saving) || channel.pending,
+  };
 
   return (
     <main>
       <ReceiverControls
-        latest={latest} disconnected={disconnected} antenna={antenna} gain={gain} averages={averages} canReset={view !== null || Boolean(focus.error)}
-        resetRange={() => commitRange(null)}
+        latest={latest} disconnected={disconnected} antenna={antenna} gain={gain} averages={averages}
+        canReset={!channel.pending && (channel.active || view !== null || Boolean(focus.error))}
+        resetRange={() => channel.active ? stopListening(true) : commitRange(null)}
       />
-      <div className={'spectrum-workspace' + (bookmarksOpen ? ' bookmarks-open' : '')}>
+      <div className={'spectrum-workspace' + (bookmarksOpen ? ' bookmarks-open' : '') + (channel.open ? ' channel-open' : '')}>
       <SpectrumPanel
         latest={latest} shown={shown} view={view} frozen={frozen} status={connectionStatus(latest, frozen, disconnected)}
         toggleFreeze={toggleFreeze} previewRange={previewRange} commitRange={commitRange}
         cancelFocusDelay={focus.cancelDelay} image={image}
+        channel={channel.active || channel.open ? channel : null}
+        channelTools={channel.state && {open: channel.open, buttonRef: channelToggle,
+          toggle: () => channel.open ? closeChannel() : channel.setOpen(true), disabled: !channel.state.available,
+          title: channel.state.available ? undefined : 'Install SciPy on the receiver to enable channels'}}
         bookmarks={bookmarksOpen ? bookmarks.bookmarks : null}
         bookmarkTools={{open: bookmarksOpen, toggle: () => bookmarksOpen ? closeBookmarks() : setBookmarksOpen(true),
-          ref: toggleButton, select: () => bookmarkDraft ? changeBookmarkDraft({selecting: true}) : editBookmark(null, true)}}
+          buttonRef: bookmarksToggle, select: () => bookmarkDraft ? changeBookmarkDraft({selecting: true}) : editBookmark(null, true)}}
         bookmarkSelection={bookmarkSelection}
-        inspectBookmarks={ids => setSelectedBookmarks(ids)}
+        bookmarkActions={bookmarkActions}
       />
+      {(channel.open || bookmarksOpen) && <div className="receiver-sidebar">
+      {channel.open && <ChannelPanel receiver={channel} stop={() => stopListening()} close={closeChannel} />}
       {bookmarksOpen && <BookmarkPanel store={bookmarks} close={closeBookmarks}
         draft={bookmarkDraft} changeDraft={changeBookmarkDraft} edit={editBookmark} cancelDraft={() => setBookmarkDraft(null)}
-        tune={tuneBookmark} selectedIds={selectedBookmarks} showAll={() => setSelectedBookmarks(null)} />}
+        actions={bookmarkActions} listen={channel.state?.available ? listenToBookmark : null}
+        selectedIds={selectedBookmarks} showAll={() => setSelectedBookmarks(null)} />}
+      </div>}
       </div>
       <footer>
         <p id="detail">{error || detailStatus(sweep, antenna, gain, averages, imageEnabled)}</p>

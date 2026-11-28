@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 from collections import defaultdict, deque
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -13,10 +14,13 @@ import numpy as np
 
 from fpga_sweep import BandSweep
 from bookmarks import BookmarkAPI, BookmarkStore, default_bookmark_path
+from demodulation import DEMO_FM, DEMO_STEREO_HZ, DemoStereo, demo_iq
+from listening import ChannelTap, CaptureUnavailable, IQCapture, Listening, bookmark_tune, validate_tune
 
 LOW, HIGH = 70e6, 6e9
 MAX_RATE = 56
 NARROW_RATE = MAX_RATE * 1e6 / 4
+DEMO_CAPTURE_RATE = 2.4e6
 DEFAULT_AVERAGES = 8
 MAX_AVERAGES = 32
 DISPLAY_BINS = 4096
@@ -110,6 +114,12 @@ def continuous_plan(focus, rate, bandwidth):
     gap = (inner + outer - (high - low)) / 2
     center = low - gap if low - gap >= LOW else high + gap
     return center, low, high, first, end - first
+
+
+def spectrum_power(samples, window, window_sum):
+    blocks = samples.reshape(-1, len(window))
+    fft = np.fft.fftshift(np.fft.fft((blocks - blocks.mean(axis=1, keepdims=True)) * window), axes=1)
+    return np.mean(np.abs(fft / window_sum) ** 2, axis=0)
 
 
 class Receiver:
@@ -248,23 +258,24 @@ class Receiver:
                 return
         raise RuntimeError("Timed out draining the continuous RX stream")
 
-    def receive(self, center, continuous=False):
+    def receive(self, center, continuous=False, tap=None):
         received = 0
-        while received < self.command.num_samps:
-            count = self.stream.recv(self.samples[:, received:], self.metadata, 0.25)
+        while received < self.samples.shape[1]:
+            end = received + tap.count if tap else self.samples.shape[1]
+            count = self.stream.recv(self.samples[:, received:end], self.metadata, 0.25)
             if continuous and self.metadata.error_code == self.uhd.types.RXMetadataErrorCode.overflow:
                 return False  # Discard the partial FFT window across the missing samples.
             if not count or self.metadata.error_code != self.uhd.types.RXMetadataErrorCode.none:
                 raise RuntimeError(f"RX at {center / 1e6:.2f} MHz: {self.metadata.strerror()}")
+            if tap:
+                tap.push(self.samples[0, received:received + count])
             received += count
         if self.overload is not None:
             self.overload.observe()
         return True
 
     def spectrum(self):
-        blocks = self.samples.reshape(self.averages, self.size)
-        fft = np.fft.fftshift(np.fft.fft((blocks - blocks.mean(axis=1, keepdims=True)) * self.window), axes=1)
-        return np.mean(np.abs(fft / self.window_sum) ** 2, axis=0)
+        return spectrum_power(self.samples, self.window, self.window_sum)
 
 
 class Demo:
@@ -276,7 +287,7 @@ class Demo:
     def measure(self, center, offsets):
         frequency = center + offsets
         power = 10 ** (self.random.normal(-93, 2, frequency.size) / 10)
-        for signal, width, level in [(98e6, 1.5e6, -48), (450e6, 0.6e6, -53),
+        for signal, width, level in [(DEMO_FM[0][0], 85e3, -48), (DEMO_STEREO_HZ, 90e3, -44), (450e6, 0.6e6, -53),
                                      (945e6, 6e6, -60), (1.8e9, 15e6, -63),
                                      (2.44e9, 11e6, -48), (5.19e9, 14e6, -56), (433.92e6, 4500, -48)]:
             power += 10 ** (level / 10) * np.exp(-0.5 * ((frequency - signal) / width) ** 2)
@@ -304,9 +315,11 @@ class RecentPeaks:
 class Sweep:
     def __init__(self, args):
         self.args = args
+        self.listening = Listening()
         self.focus = None
         self.navigation_lock = threading.Lock()
         self.navigation_revision = 0
+        self.bookmark_channel = None
         self.requested_gain = args.gain
         self.requested_antenna = None if args.demo else args.antenna
         self.antenna_options = ()
@@ -390,6 +403,7 @@ class Sweep:
                 if focus is None and self.recent_peaks.region is not None:
                     self.recent_peaks = RecentPeaks()
                 plan = None if self.args.demo else continuous_plan(focus, receiver.rate, receiver.bandwidth)
+                demo_continuous = self.args.demo and focus and focus[1] - focus[0] <= 2e6
                 image_region = ((focus, self.capture_antenna, self.capture_gain, averages)
                                 if plan is None and self.image_reject_available
                                 and self.image_reject_requested else None)
@@ -398,7 +412,9 @@ class Sweep:
                     self.image_references.clear()
                     self.recent_peaks = RecentPeaks()
                     self.shifted_peaks.clear()
-                if plan is None:
+                if demo_continuous:
+                    self.demo_continuous(receiver, focus, averages)
+                elif plan is None:
                     if not self.args.demo:
                         rf.set_stream_rate(rf.rate)
                         rf.set_fft_size(FFT_SIZE, averages)
@@ -413,6 +429,7 @@ class Sweep:
                 else:
                     self.continuous(receiver, focus, plan, gain, averages, antenna)
             except Exception as error:
+                self.listening.interrupt()
                 self.snapshot = dict(self.snapshot, error=str(error), progress=0, rx_overload=None)
                 receiver = None
                 rf = None
@@ -462,6 +479,41 @@ class Sweep:
                      image_leg=leg, image_detail=image_detail, rx_overload=self.snapshot["rx_overload"])
         return True
 
+    def demo_continuous(self, receiver, focus, averages):
+        rate = DEMO_CAPTURE_RATE
+        center = sum(focus) / 2
+        fft_size = 8192
+        fft_window = np.hanning(fft_size)
+        fft_sum = fft_window.sum()
+        count = fft_size * averages
+        width = rate / fft_size
+        low = center - rate / 2 - width / 2
+        high = low + rate
+        capture = IQCapture(center, rate, (max(LOW, center - rate / 2), min(HIGH, center + rate / 2)), focus)
+        peaks = RecentPeaks()
+        deadline = time.monotonic()
+        sample_index = windows = 0
+        next_update = 0
+        stereo = DemoStereo(center, rate)
+        with ChannelTap(self.listening, capture) as tap:
+            while self.focus == focus:
+                deadline += count / rate
+                time.sleep(max(0, deadline - time.monotonic()))
+                samples = demo_iq(center, rate, sample_index, count, receiver.random, stereo)
+                sample_index += count
+                tap.push(samples)
+                power = spectrum_power(samples, fft_window, fft_sum)
+                bins = (10 * np.log10(np.maximum(1e-16, power))).astype(np.float32)
+                now = time.monotonic()
+                held = peaks.update((low, high), bins, now)
+                windows += 1
+                if now >= next_update:
+                    self.publish(bins, held, low, high, None, 4, seconds=CONTINUOUS_UPDATE_SECONDS,
+                                 hops=1, continuous=True, windows=windows, focus=focus, fft_size=fft_size,
+                                 stream_rate=rate)
+                    self.cache_detail()
+                    next_update = now + CONTINUOUS_UPDATE_SECONDS
+
     def continuous(self, receiver, focus, plan, gain, averages, antenna):
         center, low, high, first, size = plan
         radio = receiver.receiver if isinstance(receiver, BandSweep) else receiver
@@ -509,33 +561,37 @@ class Sweep:
         gaps = 0
         self.recent_peaks = RecentPeaks()
         radio.set_fft_size(fft_size, averages)
-        radio.start_continuous()
-        try:
-            while (self.focus == focus and self.requested_antenna == antenna
-                   and self.requested_gain == gain and self.requested_averages == averages):
-                if not radio.receive(actual, continuous=True):
-                    gaps += 1
-                    continue
-                power = radio.spectrum()
-                if native_slice is not None:
-                    bins[:] = 10 * np.log10(np.maximum(1e-16, power[native_slice]))
-                elif full_window:
-                    bins[:] = 10 * np.log10(np.maximum(1e-16, power))
-                else:
-                    bins.fill(-np.inf)
-                    np.maximum.at(bins, indices, 10 * np.log10(np.maximum(1e-16, power[mask])))
-                now = time.perf_counter()
-                peaks = self.recent_peaks.update((low, high), bins, now)
-                windows += 1
-                if now >= next_update:
-                    self.publish(bins, peaks, low, high, first, group, seconds=CONTINUOUS_UPDATE_SECONDS,
-                                 hops=1, continuous=True, windows=windows, gaps=gaps, focus=focus,
-                                 fft_size=fft_size, full_window=full_window, stream_rate=stream_rate,
-                                 rx_overload=radio.overload.flags if radio.overload is not None else None)
-                    self.cache_detail()
-                    next_update = now + CONTINUOUS_UPDATE_SECONDS
-        finally:
-            radio.stop_continuous()
+        half = min(stream_rate, radio.bandwidth) / 2
+        capture = IQCapture(actual, stream_rate, (max(LOW, actual - half), min(HIGH, actual + half)), focus, antenna)
+        with ChannelTap(self.listening, capture) as tap:
+            radio.start_continuous()
+            try:
+                while (self.focus == focus and self.requested_antenna == antenna
+                       and self.requested_gain == gain and self.requested_averages == averages):
+                    if not radio.receive(actual, continuous=True, tap=tap):
+                        gaps += 1
+                        tap.gap()
+                        continue
+                    power = radio.spectrum()
+                    if native_slice is not None:
+                        bins[:] = 10 * np.log10(np.maximum(1e-16, power[native_slice]))
+                    elif full_window:
+                        bins[:] = 10 * np.log10(np.maximum(1e-16, power))
+                    else:
+                        bins.fill(-np.inf)
+                        np.maximum.at(bins, indices, 10 * np.log10(np.maximum(1e-16, power[mask])))
+                    now = time.perf_counter()
+                    peaks = self.recent_peaks.update((low, high), bins, now)
+                    windows += 1
+                    if now >= next_update:
+                        self.publish(bins, peaks, low, high, first, group, seconds=CONTINUOUS_UPDATE_SECONDS,
+                                     hops=1, continuous=True, windows=windows, gaps=gaps, focus=focus,
+                                     fft_size=fft_size, full_window=full_window, stream_rate=stream_rate,
+                                     rx_overload=radio.overload.flags if radio.overload is not None else None)
+                        self.cache_detail()
+                        next_update = now + CONTINUOUS_UPDATE_SECONDS
+            finally:
+                radio.stop_continuous()
 
     def publish(self, bins, peaks, low, high, first, group, seconds, hops,
                 continuous=False, windows=0, gaps=0, focus=None, fft_size=FFT_SIZE, full_window=False,
@@ -611,6 +667,12 @@ def main():
     gain_stage_data = json.dumps(gain_stages).encode()
 
     class Handler(BookmarkAPI, BaseHTTPRequestHandler):
+        def bookmark_recalled(self, bookmark):
+            preset = bookmark_tune(bookmark)
+            sweep.bookmark_channel = asdict(preset)
+            listen = sweep.listening.recall(preset, LOW, HIGH)
+            return {"channel": sweep.bookmark_channel, "listen": listen}
+
         def do_GET(self):
             if self.handle_bookmarks():
                 return
@@ -622,7 +684,7 @@ def main():
                     self.send_error(503, "Dashboard not built. Run npm ci and npm run build.")
                     return
                 kind = "text/html; charset=utf-8"
-            elif self.path == "/api/sweep":
+            elif self.path in ("/api/sweep", "/api/sweep?survey=1"):
                 snapshot = sweep.snapshot
                 frame = {key: value for key, value in snapshot.items() if key not in ("detail", "peak_detail", "image_detail")}
                 frame["gain_table"] = args.gain_table
@@ -634,11 +696,34 @@ def main():
                     frame["antenna_options"] = sweep.antenna_options
                     frame["antenna_error"] = sweep.antenna_error
                     frame["navigation_revision"] = sweep.navigation_revision
+                    frame["bookmark_channel"] = sweep.bookmark_channel
+                    frame["listen"] = sweep.listening.snapshot()
                 frame["peaks"] = bool(snapshot["peak_detail"])
                 frame["image_reject_available"] = sweep.image_reject_available
                 frame["image_reject_requested"] = sweep.image_reject_requested
                 frame["image_set"] = bool(snapshot["image_detail"])
+                frame["survey_number"] = snapshot["number"]
                 kind, body = "application/json", json.dumps(frame, allow_nan=False).encode()
+            elif self.path == "/api/listen":
+                return self.listen_json(200, sweep.listening.snapshot())
+            elif self.path in ("/api/listen/audio", "/api/listen/iq"):
+                iq = self.path.endswith("/iq")
+                request, _, _, epoch = sweep.listening.read_settings()
+                if request is None or (request.mode == "iq") != iq:
+                    return self.listen_json(409, {"error": "Start a channel in IQ mode" if iq else "Start a channel in an audio mode"})
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                if not iq:
+                    self.send_header("X-Audio-Channels", str(request.audio_channels))
+                self.end_headers()
+                self.connection.settimeout(2)
+                try:
+                    sweep.listening.stream(self.wfile.write, epoch, request.sample_size)
+                except OSError:
+                    pass
+                return
             elif self.path == "/api/gain-stages":
                 kind, body = "application/json", gain_stage_data
             elif self.path.startswith("/api/detail/"):
@@ -678,6 +763,27 @@ def main():
         def do_POST(self):
             if self.handle_bookmarks():
                 return
+            if self.path == "/api/listen":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if self.headers.get_content_type() != "application/json" or not 0 < length <= 512:
+                        raise ValueError("Expected a JSON channel selection or null")
+                    value = json.loads(self.rfile.read(length))
+                    full = value == {"stop": "full"}
+                    request = validate_tune(value, LOW, HIGH) if value is not None and not full else None
+                except (ValueError, UnicodeError) as error:
+                    return self.listen_json(400, {"error": str(error)})
+                if request and not sweep.listening.snapshot()["available"]:
+                    return self.listen_json(503, {"error": "Install SciPy on the receiver to enable channel demodulation"})
+                with sweep.navigation_lock:
+                    if full:
+                        sweep.focus = None
+                    try:
+                        state = sweep.listening.configure(request, sweep.focus)
+                    except CaptureUnavailable as error:
+                        return self.listen_json(409, {"error": str(error)})
+                    state["survey_focus"] = sweep.focus
+                return self.listen_json(200, state)
             if self.path not in ("/api/focus", "/api/antenna", "/api/gain", "/api/averages", "/api/image-reject"):
                 self.send_error(404)
                 return
@@ -733,8 +839,11 @@ def main():
                 sweep.focus = focus
             self.reply("application/json", json.dumps(focus).encode())
 
-        def reply(self, kind, body):
-            self.send_response(200)
+        def listen_json(self, status, value):
+            self.reply("application/json", json.dumps(value, allow_nan=False).encode(), status)
+
+        def reply(self, kind, body, status=200):
+            self.send_response(status)
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")

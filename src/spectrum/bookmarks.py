@@ -154,6 +154,9 @@ def bookmark_focus(frequency, focus, value, bandwidth=None):
 class BookmarkAPI:
     """Mixin for BaseHTTPRequestHandler; store and receiver_state are injected."""
 
+    def bookmark_recalled(self, bookmark):
+        return {}
+
     def bookmark_json(self, status, value):
         body = json.dumps(value, allow_nan=False).encode()
         self.send_response(status)
@@ -205,8 +208,9 @@ class BookmarkAPI:
                     receiver.focus = focus
                     receiver.navigation_revision += 1
                     revision = receiver.navigation_revision
+                    selection = self.bookmark_recalled(bookmark)
                 self.bookmark_json(200, {"bookmark": bookmark, "focus": focus,
-                                         "navigation_revision": revision})
+                                         "navigation_revision": revision, **selection})
             else:
                 self.bookmark_json(404, {"error": "Unknown bookmark endpoint or method"})
         except KeyError:

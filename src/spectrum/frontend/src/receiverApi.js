@@ -23,6 +23,15 @@ export function writeReceiverSetting(setting, value, signal) {
   });
 }
 
+export async function writeChannelSetting(value) {
+  const response = await fetch('/api/listen', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(value),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'Channel request failed');
+  return result;
+}
+
 /** A null result means the four-frame server cache already evicted this sweep. */
 export async function fetchDetail(frame, signal) {
   const options = new URLSearchParams();

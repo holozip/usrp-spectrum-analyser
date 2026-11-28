@@ -1,4 +1,4 @@
-import {frequencyLabel, LEFT_MARGIN, RIGHT_MARGIN} from './spectrumData.js';
+import {channelPassband, frequencyLabel, LEFT_MARGIN, RIGHT_MARGIN} from './spectrumData.js';
 
 function drawLine(context, x1, y1, x2, y2, color) {
   context.strokeStyle = color;
@@ -8,7 +8,7 @@ function drawLine(context, x1, y1, x2, y2, color) {
   context.stroke();
 }
 
-export function drawSpectrum(canvas, layout, data, view, power, cursor, selection) {
+export function drawSpectrum(canvas, layout, data, view, power, cursor, selection, channel) {
   const {width, height, scale, top} = layout;
   const {low, high, dataLow, dataHigh, values, peaks, rejected} = data;
   const {low: powerLow, span: powerSpan} = power;
@@ -27,7 +27,6 @@ export function drawSpectrum(canvas, layout, data, view, power, cursor, selectio
   if (right <= left || plotHeight === 0) return;
 
   const span = high - low;
-  const binWidth = (dataHigh - dataLow) / values.length;
   const x = fraction => left + fraction * (right - left);
   const y = value => bottom - (value - powerLow) / powerSpan * plotHeight;
 
@@ -54,7 +53,18 @@ export function drawSpectrum(canvas, layout, data, view, power, cursor, selectio
     context.fillText(label, position, bottom + 22);
   }
 
+  const passband = channelPassband(channel, low, high);
+  if (passband) {
+    const start = x(passband[0]);
+    const end = x(passband[1]);
+    const center = (channel.frequency_hz - low) / span;
+    context.fillStyle = '#87aaff33';
+    context.fillRect(start, top, end - start, plotHeight);
+    if (center >= 0 && center <= 1) drawLine(context, x(center), top, x(center), bottom, '#a9bcff');
+  }
+
   if (values.length) {
+    const binWidth = (dataHigh - dataLow) / values.length;
     const first = Math.max(0, Math.floor((low - dataLow) / binWidth) - 1);
     const last = Math.min(values.length, Math.ceil((high - dataLow) / binWidth) + 1);
     function drawTrace(trace, color) {

@@ -27,7 +27,7 @@ For the live dashboard, install UHD with its Python bindings on the computer con
 python3 src/spectrum/server.py --antenna TX/RX --fpga-band-sweep
 ```
 
-Open the [local dashboard](http://127.0.0.1:8000). The live command starts on **RF A · TX/RX** and loads the bundled FPGA image into RAM. Use **RX antenna** in the dashboard to switch between TX/RX and RX2 on RF A or RF B. A switch briefly pauses capture while the new input starts. To set the starting port, use `--antenna A:TX/RX`, `A:RX2`, `B:TX/RX`, or `B:RX2`. Omit `--fpga-band-sweep` for ordinary UHD operation.
+Open the [local dashboard](http://127.0.0.1:8000). The live command starts on **RF A · TX/RX** and loads the bundled FPGA image into RAM. Use **RX antenna** in the dashboard to switch between TX/RX and RX2 on RF A or RF B. The spectrum and active channel use the selected input. A switch briefly pauses capture while the new input starts. To set the starting port, use `--antenna A:TX/RX`, `A:RX2`, `B:TX/RX`, or `B:RX2`. Omit `--fpga-band-sweep` for ordinary UHD operation.
 
 Vite builds into `build/spectrum/`. The Python process serves that directory's dashboard at `/`, its bundles at `/assets/`, and the receiver API at `/api/` on the same loopback port. Build in the checkout or copy the entire `build/spectrum/` directory to the same location in the target checkout. Node is only needed where you build or develop the frontend. The dashboard assumes the URL base is `/` and has one page, with no route fallback needed.
 
@@ -46,6 +46,18 @@ Vivado is needed only to rebuild the image. To install a system-wide copy, run `
 - The sweep uses 56 MS/s, 56 MHz analog bandwidth, and a 16,384-point FFT by default. FFT spacing is 3.42 kHz. The stitched sweep's finest display bins are 3.77 kHz. Continuous views at 2 MHz or narrower decimate to 14 MS/s and use a 32,768-point FFT (427 Hz spacing). At 500 kHz or narrower, a 65,536-point FFT gives 214 Hz spacing. The master clock and analog bandwidth stay at 56 MHz.
 - **FFT averages** sets the number of FFT blocks averaged per capture, from 1 to 32. The default is 8. Higher counts smooth the noise floor and take longer to capture. Use `--averages N` to set the starting value.
 
+## Select a channel
+
+Install SciPy alongside NumPy on the receiver. Rebuild the dashboard with `npm run build` and start the server with your usual options. Select **Channel** next to **Bookmarks** in the plot toolbar to open its side panel. Click the spectrum or waterfall to select a channel, or enter the frequency directly. The shaded passband shows the filter width and sideband.
+
+- Choose USB, LSB, NFM, WFM, WFM Stereo, or AM and select **Listen**. Choose **IQ** for a channel-filtered complex sample stream and copy its URL from the panel. Settings apply as you change them while the channel is active.
+- Audio and IQ use the existing continuous capture. Starting, stopping, changing mode, and selecting an in-band channel leave the radio tuning and sample rate in place. Zoom in from a swept view before starting a channel. The entire passband must fit in the captured IQ.
+- Broadcast FM has a 15 kHz audio passband and 50 or 75 µs de-emphasis. **WFM Stereo** locks to the stereo pilot and blends toward mono if the pilot fades. Both broadcast modes display the RDS station name, programme ID, and RadioText when received.
+- The active channel panel shows power across the channel filter in dBFS and estimated SNR in dB using nearby noise. Leave squelch blank for continuous audio, or enter a threshold in dBFS. Play, pause, and volume apply to the current tab. **Freeze trace** pauses the display while audio continues.
+- **Tune** on a bookmark recalls its survey view and selects the channel. If a channel is already active, it retunes to the bookmark. **Listen** starts the bookmarked channel from the running capture when its passband fits.
+
+One active channel is shared between connected tabs. In `--demo`, zoom to a 2 MHz or narrower view around **98.600 MHz** to try stereo and RDS, **98.100 MHz** for WFM mono, or **433.920 MHz** for NFM. [Channel API and stream formats](docs/api.md#channel-receiver)
+
 ## Signal bookmarks
 
 Use **Bookmark signal** on the spectrum to select a signal without retuning:
@@ -57,10 +69,10 @@ and restores ordinary chart gestures.
 
 The panel lists bookmarks in a table with frequency, title, modulation,
 bandwidth and tag, plus explicit **Tune**, **Edit** and **Delete** actions.
-Tune uses the saved bandwidth to show the signal with surrounding context;
-entries without bandwidth retain the previous span behaviour. Merely
-selecting, saving or editing a signal does not tune the receiver. Modulation
-and bandwidth are descriptive metadata, not demodulator/filter settings.
+Tune uses the saved bandwidth to show the signal with surrounding context.
+It also opens Channel with the bookmarked frequency, a supported demodulator
+and a compatible filter width. When playback is off, Tune prepares the channel
+for **Listen**. Selecting, saving or editing leaves the receiver tuned as it was.
 
 While the panel is open, visible bookmarked frequencies are flagged on the
 spectrum. Flags follow the displayed trace and are arranged to avoid label
@@ -116,9 +128,9 @@ Start the Python demo or live receiver in one terminal, then run `npm run dev` i
 | `npm run preview` | Preview the build through Vite with the same API proxy. |
 | `npm run lint` | Check JavaScript, JSX and React hook dependencies. |
 | `npm test` | Test range logic, binary trace decoding, trace selection and bookmark flag placement. |
-| `python3 -m unittest discover -s src/spectrum/tests -p 'test_*.py' -v` | Test bookmark persistence, validation, concurrent writes and HTTP operations without a radio. |
+| `python3 -m unittest discover -s src/spectrum/tests -p 'test_*.py' -v` | Test bookmarks, HTTP operations and channel demodulation without a radio. |
 | `npx playwright install chromium` | Install Chromium for the browser tests. |
-| `npm run test:browser` | Test a fresh production build after running `npm run build`. The suite starts its own Python demo with an isolated in-memory bookmark database on port 18742. |
+| `npm run test:browser` | Test a fresh production build after running `npm run build`. The suite uses SciPy for channel playback tests and starts its own Python demo with an isolated in-memory bookmark database on port 18742. |
 
 Set `SPECTRUM_BROWSER_PATH` when running the browser tests to use a compatible local Chromium executable.
 

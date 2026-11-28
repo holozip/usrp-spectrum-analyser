@@ -1,6 +1,6 @@
 import {useLayoutEffect, useRef, useState} from 'react';
 import {useChartWheel, watchPixelRatio} from './chartEvents.js';
-import {clamp} from './spectrumData.js';
+import {clamp, channelPassband} from './spectrumData.js';
 import {createWaterfallCanvas} from './waterfallCanvas.js';
 
 const MIN_COLOR = -160;
@@ -61,13 +61,14 @@ function ColorRange({limits, setLimits, autoRange, canAutoRange}) {
   );
 }
 
-export function Waterfall({shown, data, view, frozen, gestures}) {
+export function Waterfall({shown, data, view, frozen, gestures, channel}) {
   const canvas = useRef(null);
   const rows = useRef(null);
   const renderer = useRef(null);
   const [limits, setLimits] = useState([-115, -35]);
   const [canAutoRange, setCanAutoRange] = useState(false);
   const [low, high] = limits;
+  const passband = channelPassband(channel, data.low, data.high);
 
   useLayoutEffect(() => {
     const drawing = createWaterfallCanvas(canvas.current, rows.current, setCanAutoRange);
@@ -115,6 +116,8 @@ export function Waterfall({shown, data, view, frozen, gestures}) {
           aria-describedby="frequency-keys"
           {...gestures.surfaceHandlers('waterfall')}
         />
+        {passband && <div className="channel-waterfall-passband" aria-hidden="true"
+          style={{left: `${100 * passband[0]}%`, width: `${100 * (passband[1] - passband[0])}%`}} />}
       </div>
     </div>
   );

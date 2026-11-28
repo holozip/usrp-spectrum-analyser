@@ -5,16 +5,23 @@ import {Waterfall} from './Waterfall.jsx';
 import {selectSpectrumData, spectrumReadout} from './spectrumData.js';
 import {useFrequencyGestures} from './useFrequencyGestures.js';
 
-function CaptureTools({toolsRef, peakHold, setPeakHold, rejected, frozen, toggleFreeze, image, bookmarkTools}) {
+function SidebarToggle({name, label, icon, control}) {
+  const {buttonRef, open, toggle, disabled, title} = control;
+  return <button ref={buttonRef} id={name + '-toggle'} type="button" aria-expanded={open}
+    aria-controls={name + '-panel'} onClick={toggle} disabled={disabled} title={title}>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d={icon} /></svg>
+    <span>{label}</span>
+  </button>;
+}
+
+function CaptureTools({toolsRef, peakHold, setPeakHold, rejected, frozen, toggleFreeze, image, bookmarkTools, channelTools}) {
   return (
     <div className="capture-tools" id="capture-tools" ref={toolsRef} role="group" aria-label="Capture tools">
-      <button
-        ref={bookmarkTools.ref} id="bookmarks-toggle" type="button" aria-expanded={bookmarkTools.open}
-        aria-controls="bookmarks-panel" aria-pressed={bookmarkTools.open} onClick={bookmarkTools.toggle}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21V3h13l-3 5 3 5H6" /></svg>
-        <span>Bookmarks</span>
-      </button>
+      <div className="sidebar-tools" role="group" aria-label="Side panels">
+        <SidebarToggle name="bookmarks" label="Bookmarks" icon="M6 21V3h13l-3 5 3 5H6" control={bookmarkTools} />
+        {channelTools && <SidebarToggle name="channel" label="Channel" control={channelTools}
+          icon="M8 4H5v16h3m8-16h3v16h-3m-4-13v10" />}
+      </div>
       <button type="button" onClick={bookmarkTools.select}>Bookmark signal</button>
       <button
         id="peak-hold" type="button" aria-pressed={peakHold} disabled={rejected}
@@ -45,7 +52,7 @@ function CaptureTools({toolsRef, peakHold, setPeakHold, rejected, frozen, toggle
 
 export function SpectrumPanel({
   latest, shown, view, frozen, toggleFreeze, status, previewRange, commitRange, cancelFocusDelay, image,
-  bookmarks, bookmarkTools, inspectBookmarks, bookmarkSelection,
+  bookmarks, bookmarkTools, bookmarkActions, bookmarkSelection, channel, channelTools,
 }) {
   const panel = useRef(null);
   const plotWindow = useRef(null);
@@ -53,7 +60,8 @@ export function SpectrumPanel({
   const [share, setShare] = useState(null);
   const [peakHold, setPeakHold] = useState(true);
   const [source, setSource] = useState('rejected');
-  const gestures = useFrequencyGestures({view, shown, previewRange, commitRange, cancelFocusDelay});
+  const passband = channel?.channel;
+  const gestures = useFrequencyGestures({view, shown, previewRange, commitRange, cancelFocusDelay, tuneAt: channel?.tuneAt});
   const waitingForImage = !shown?.imageSet && !frozen && !shown?.continuous && image.enabled;
   const data = useMemo(() => selectSpectrumData(shown, view, source, waitingForImage, peakHold),
     [shown, view, source, waitingForImage, peakHold]);
@@ -87,12 +95,13 @@ export function SpectrumPanel({
         <CaptureTools
           toolsRef={tools} peakHold={peakHold} setPeakHold={setPeakHold} rejected={data.rejected}
           frozen={frozen} toggleFreeze={toggleFreeze} image={{...image, toggle: toggleImage}} bookmarkTools={bookmarkTools}
+          channelTools={channelTools}
         />
         <SpectrumPlot toolsRef={tools} data={data} view={view} gestures={gestures}
-          bookmarks={bookmarks} inspectBookmarks={inspectBookmarks} bookmarkSelection={bookmarkSelection} />
+          bookmarks={bookmarks} bookmarkActions={bookmarkActions} bookmarkSelection={bookmarkSelection} channel={passband} />
       </div>
       <PanelDivider panel={panel} plotWindow={plotWindow} setShare={setShare} />
-      <Waterfall shown={shown} data={data} view={view} frozen={frozen} gestures={gestures} />
+      <Waterfall shown={shown} data={data} view={view} frozen={frozen} gestures={gestures} channel={passband} />
     </section>
   );
 }

@@ -10,6 +10,20 @@ export function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+export function channelEdges({frequency_hz: frequency, filter_hz: width, mode}) {
+  if (mode === 'usb') return [frequency, frequency + width];
+  if (mode === 'lsb') return [frequency - width, frequency];
+  return [frequency - width / 2, frequency + width / 2];
+}
+
+export function channelPassband(channel, low, high) {
+  if (!channel || !Number.isFinite(channel.frequency_hz) || !(channel.filter_hz > 0)) return null;
+  const [start, end] = channelEdges(channel);
+  const left = (start - low) / (high - low);
+  const right = (end - low) / (high - low);
+  return right > 0 && left < 1 ? [Math.max(0, left), Math.min(1, right)] : null;
+}
+
 export function sameRange(first, second) {
   return first === second || (first != null && second != null
     && first[0] === second[0] && first[1] === second[1]);

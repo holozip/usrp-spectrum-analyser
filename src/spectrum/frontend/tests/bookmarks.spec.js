@@ -121,7 +121,7 @@ test('tuning uses dedicated endpoint; external recalls sync once without undoing
 });
 
 test('external bookmarks appear while open; flags follow visibility and crowded mobile labels stay disjoint', async ({page}) => {
-  const {state} = await mockBookmarks(page, [makeBookmark('one', 'First station')]);
+  const {state, writes} = await mockBookmarks(page, [makeBookmark('one', 'First station')]);
   await page.setViewportSize({width: 390, height: 844});
   await page.goto('/');
   await expect(page.locator('.bookmark-flags')).toHaveCount(0);
@@ -144,6 +144,7 @@ test('external bookmarks appear while open; flags follow visibility and crowded 
   await flags.first().click();
   await expect(page.getByText('Selected plot group', {exact: true})).toBeVisible();
    await expect(page.getByRole('rowheader', {name: 'Offscreen station', exact: true})).toHaveCount(0);
+  expect(writes).toEqual([]);
   await page.getByRole('button', {name: 'Close bookmarks'}).click();
   await expect(page.locator('.bookmark-flags')).toHaveCount(0);
   await expect(page.getByRole('button', {name: 'Bookmarks', exact: true})).toBeFocused();
@@ -209,27 +210,30 @@ test('bookmark load failure offers retry and recovers without reload', async ({p
   expect(writes).toEqual([]);
 });
 
-test('failed tune and delete are actionable and preserve the saved bookmark', async ({page}) => {
-  const {state, writes} = await mockBookmarks(page, [makeBookmark('station', 'Remote station', 145e6)]);
+test('plot flag recall failures are actionable and the saved bookmark can be tuned or deleted', async ({page}) => {
+  const {state, writes} = await mockBookmarks(page,
+    [{...makeBookmark('station', 'Local station', 101.4e6), bandwidth_hz: 150e3}]);
   await page.goto('/');
   await expect(page.locator('#plot')).toHaveAttribute('aria-label', /100.0000 MHz to 102.0000 MHz/);
   await page.getByRole('button', {name: 'Bookmarks', exact: true}).click();
   const panel = page.getByRole('complementary', {name: 'Spectrum bookmarks'});
-  const tune = panel.getByRole('button', {name: 'Tune to 145.0000 MHz, Remote station', exact: true});
+  const tune = page.getByRole('group', {name: 'Visible spectrum bookmarks'})
+    .getByRole('button', {name: /^Tune to Local station, 101\.4000 MHz/});
   state.fail = 'POST';
   await tune.click();
   await expect(panel.getByRole('alert')).toContainText('Could not tune to bookmark: Storage unavailable. Try again.');
   await expect(page.locator('#plot')).toHaveAttribute('aria-label', /100.0000 MHz to 102.0000 MHz/);
   expect(state.focus).toEqual([100e6, 102e6]);
   await expect(tune).toBeEnabled();
-  await tune.click();
-  await expect(page.locator('#plot')).toHaveAttribute('aria-label', /144.0000 MHz to 146.0000 MHz/);
-  await panel.getByRole('button', {name: 'Delete Remote station', exact: true}).click();
+  await tune.press('Enter');
+  await expect(page.locator('#plot')).toHaveAttribute('aria-label', /101.1750 MHz to 101.6250 MHz/);
+  expect(writes.slice(0, 2)).toEqual(Array(2).fill({path: '/api/bookmarks/station/tune', method: 'POST', body: {}}));
+  await panel.getByRole('button', {name: 'Delete Local station', exact: true}).click();
   state.fail = 'DELETE';
   await panel.getByRole('button', {name: 'Confirm delete', exact: true}).click();
   await expect(panel.getByRole('alert')).toContainText('Could not delete bookmark: Storage unavailable. Try again.');
   expect(state.bookmarks).toHaveLength(1);
-   await expect(panel.getByRole('rowheader', {name: 'Remote station', exact: true})).toBeVisible();
+  await expect(panel.getByRole('rowheader', {name: 'Local station', exact: true})).toBeVisible();
   await panel.getByRole('button', {name: 'Confirm delete', exact: true}).click();
   await expect(panel.getByText('No bookmarks yet.', {exact: false})).toBeVisible();
   expect(writes.filter(write => write.path === '/api/focus')).toEqual([]);

@@ -31,14 +31,14 @@ test.afterEach(async ({playwright, baseURL}) => {
   try {
     for (const id of ownedIds) await cleanup.delete('/api/bookmarks/' + id);
     ownedIds.clear();
-    await cleanup.post('/api/focus', {data: null});
+    await cleanup.post('/api/listen', {data: {stop: 'full'}});
   } finally {await cleanup.dispose();}
 });
 
 test('HTTP-created bookmarks share UI edits, persistence, recall and deletion', async ({page, request}) => {
   await request.post('/api/focus', {data: [100e6, 102e6]});
   const created = await request.post('/api/bookmarks', {data: {
-    frequency_hz: 101e6, bandwidth_hz: 150e3, tag: 'Demo', title: 'API integration signal', modulation: 'FM?', notes: 'Unverified demo observation',
+    frequency_hz: 101e6, bandwidth_hz: 150e3, tag: 'Demo', title: 'API integration signal', modulation: 'Broadcast FM', notes: 'Unverified demo observation',
   }});
   expect(created.status()).toBe(201);
   const bookmark = await created.json();
@@ -63,12 +63,28 @@ test('HTTP-created bookmarks share UI edits, persistence, recall and deletion', 
     await page.reload();
     await page.getByRole('button', {name: 'Bookmarks', exact: true}).click();
      await expect(panel.getByText('Edited by the browser, stored on the server', {exact: true})).toBeVisible();
-     await panel.getByRole('button', {name: 'Tune to 101.0000 MHz, API integration signal', exact: true}).click();
+     await page.getByRole('group', {name: 'Visible spectrum bookmarks'})
+       .getByRole('button', {name: /^Tune to API integration signal, 101\.0000 MHz/}).click();
      await expect(page.locator('#plot')).toHaveAttribute('aria-label', /100.7000 MHz to 101.3000 MHz/);
+    const channel = page.getByRole('complementary', {name: 'Channel controls'});
+    await expect(channel.getByLabel('Frequency (MHz)')).toHaveValue('101');
+    await expect(channel.getByLabel('Demodulator')).toHaveValue('wfm');
+    await expect(channel.getByLabel('Filter (kHz)')).toHaveValue('200');
+    const listen = async () => (await (await request.get('/api/listen')).json());
+    expect((await listen()).settings).toBe(null);
+    await expect.poll(async () => (await listen()).capture?.focus).toEqual([100.7e6, 101.3e6]);
+    await expect(channel.getByRole('button', {name: 'Listen', exact: true})).toBeEnabled();
+    const started = await request.post('/api/listen', {data: {mode: 'iq', frequency_hz: 101100000}});
+    expect(started.status()).toBe(200);
+    await expect(channel.getByRole('status')).toHaveText('Streaming IQ');
     await panel.getByRole('button', {name: 'Close bookmarks'}).click();
+    await channel.getByRole('button', {name: 'Close channel controls'}).click();
     const recalled = await request.post(path + '/tune', {data: {span_hz: 500e3}});
     expect(recalled.status()).toBe(200);
     await expect(page.locator('#plot')).toHaveAttribute('aria-label', /100.7500 MHz to 101.2500 MHz/);
+    await expect(channel.getByLabel('Demodulator')).toHaveValue('wfm');
+    await expect(channel.getByLabel('Frequency (MHz)')).toHaveValue('101');
+    expect((await listen()).settings).toMatchObject({frequency_hz: 101e6, mode: 'wfm', filter_hz: 200e3});
     const sweep = await (await request.get('/api/sweep')).json();
     expect(sweep.focus).toEqual([100.75e6, 101.25e6]);
     expect(sweep.navigation_revision).toBe((await recalled.json()).navigation_revision);

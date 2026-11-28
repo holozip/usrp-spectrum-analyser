@@ -39,7 +39,9 @@ export function useSweep(localView) {
   const frozen = state.frozenFrame !== undefined;
 
   const pollDelay = useEffectEvent(() => {
-    if (view && !frozen) return clamp((state.latest?.seconds || 0.08) * 500, 40, 350);
+    if ((view || state.latest?.listen?.settings) && !frozen) {
+      return clamp((state.latest?.seconds || 0.08) * 500, 40, 350);
+    }
     return 350;
   });
 

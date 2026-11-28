@@ -1,6 +1,7 @@
 import {Fragment, useEffect, useId, useRef, useState} from 'react';
 import {frequencyLabel, FULL_RANGE} from './spectrumData.js';
 import {MAX_BOOKMARK_BANDWIDTH} from './bookmarkSelection.js';
+import {SidebarPanel} from './SidebarPanel.jsx';
 
 function BookmarkForm({fields, change, mutate, done}) {
   const notesId = useId();
@@ -54,29 +55,20 @@ function BookmarkForm({fields, change, mutate, done}) {
   </form>;
 }
 
-export function BookmarkPanel({store, close, tune, selectedIds, showAll, draft, changeDraft, edit, cancelDraft}) {
+export function BookmarkPanel({store, close, actions, listen, selectedIds, showAll, draft, changeDraft, edit, cancelDraft}) {
   const [confirmDelete, setConfirmDelete] = useState(null);
-  const [busy, setBusy] = useState(null);
-  const [error, setError] = useState(null);
+  const {busy, error, tuneDisabled} = actions;
   const heading = useRef(null);
   useEffect(() => {heading.current?.focus();}, [selectedIds]);
   const bookmarks = store.bookmarks.filter(bookmark => !selectedIds || selectedIds.includes(bookmark.id))
     .sort((a, b) => a.frequency_hz - b.frequency_hz || a.title.localeCompare(b.title));
 
-  async function perform(bookmark, action) {
-    setBusy(bookmark.id); setError(null);
-    try {
-      if (action === 'delete') {
-        await store.mutate('/' + encodeURIComponent(bookmark.id), 'DELETE');
-        setConfirmDelete(null);
-      } else await tune(bookmark);
-    } catch (failure) {setError(`Could not ${action === 'delete' ? 'delete' : 'tune to'} bookmark: ${failure.message}. Try again.`);}
-    finally {setBusy(null);}
+  async function removeBookmark(bookmark) {
+    if (await actions.remove(bookmark)) setConfirmDelete(null);
   }
-  return <aside id="bookmarks-panel" className="bookmarks-panel" aria-label="Spectrum bookmarks">
-    <div className="bookmarks-heading"><h2 tabIndex={-1} ref={heading}>Bookmarks</h2>
-      <button type="button" aria-label="Close bookmarks" onClick={close}>Close</button></div>
-    <p>Saved on this receiver · Tune recalls a view around the signal, not a demodulator filter.</p>
+  return <SidebarPanel id="bookmarks-panel" label="Spectrum bookmarks" title="Bookmarks"
+    closeLabel="Close bookmarks" close={close} headingRef={heading}>
+    <p>Saved on this receiver · Tune recalls the spectrum view and selects the channel.</p>
     <button type="button" className="bookmark-add" disabled={draft?.saving} onClick={() => edit()}>Add bookmark</button>
     {store.error && <div><p className="input-error" role="alert">{store.error}</p><button type="button" onClick={store.retry}>Retry loading</button></div>}
     {error && <p className="input-error" role="alert">{error}</p>}
@@ -93,18 +85,20 @@ export function BookmarkPanel({store, close, tune, selectedIds, showAll, draft, 
       <td>{bookmark.bandwidth_hz == null ? 'Unknown' : (bookmark.bandwidth_hz / 1000).toLocaleString(undefined, {maximumFractionDigits: 3}) + ' kHz'}</td>
       <td>{bookmark.modulation || 'Unknown'}</td><td>{bookmark.tag || '—'}</td>
       <td><div className="bookmark-actions">
-        <button type="button" disabled={busy !== null || draft?.saving}
+        <button type="button" disabled={tuneDisabled}
           aria-label={`Tune to ${frequencyLabel(bookmark.frequency_hz, true)}, ${bookmark.title}`}
-          onClick={() => void perform(bookmark, 'tune')}>Tune</button>
-        <button type="button" disabled={busy !== null || draft?.saving} onClick={() => edit(bookmark)} aria-label={'Edit ' + bookmark.title}>Edit</button>
-        <button type="button" disabled={busy !== null || draft?.saving} onClick={() => setConfirmDelete(bookmark.id)} aria-label={'Delete ' + bookmark.title}>Delete</button>
+          onClick={() => void actions.tune(bookmark)}>Tune</button>
+        {listen && <button type="button" disabled={tuneDisabled}
+          aria-label={'Listen to ' + bookmark.title} onClick={() => listen(bookmark)}>Listen</button>}
+        <button type="button" disabled={busy || draft?.saving} onClick={() => edit(bookmark)} aria-label={'Edit ' + bookmark.title}>Edit</button>
+        <button type="button" disabled={busy || draft?.saving} onClick={() => setConfirmDelete(bookmark.id)} aria-label={'Delete ' + bookmark.title}>Delete</button>
       </div></td></tr>
       {bookmark.notes && <tr className="bookmark-notes-row"><td colSpan={6}><p className="bookmark-notes">{bookmark.notes}</p></td></tr>}
       {confirmDelete === bookmark.id && <tr><td colSpan={6}><div className="bookmark-delete" role="group" aria-label={'Confirm deletion of ' + bookmark.title}>
         <p>Delete “{bookmark.title}”? This cannot be undone.</p>
-        <button type="button" disabled={busy !== null} onClick={() => void perform(bookmark, 'delete')}>Confirm delete</button>
-        <button type="button" disabled={busy !== null} onClick={() => setConfirmDelete(null)}>Keep bookmark</button>
+        <button type="button" disabled={busy} onClick={() => void removeBookmark(bookmark)}>Confirm delete</button>
+        <button type="button" disabled={busy} onClick={() => setConfirmDelete(null)}>Keep bookmark</button>
       </div></td></tr>}
     </Fragment>)}</tbody></table></div>
-  </aside>;
+  </SidebarPanel>;
 }

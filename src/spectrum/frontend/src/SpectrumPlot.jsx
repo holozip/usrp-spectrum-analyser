@@ -95,7 +95,7 @@ function PowerAxis({layout, power, setPower, clearCursor}) {
   );
 }
 
-export function SpectrumPlot({toolsRef, data, view, gestures, bookmarks, inspectBookmarks, bookmarkSelection}) {
+export function SpectrumPlot({toolsRef, data, view, gestures, bookmarks, bookmarkActions, bookmarkSelection, channel}) {
   const plot = useRef(null);
   const [power, setPower] = useState(DEFAULT_POWER);
   const [layout, setLayout] = useState({width: 0, height: 0, scale: 1, top: 0});
@@ -124,8 +124,8 @@ export function SpectrumPlot({toolsRef, data, view, gestures, bookmarks, inspect
 
   const {cursor, selection} = gestures;
   useLayoutEffect(() => {
-    drawSpectrum(plot.current, layout, data, view, power, cursor, selection);
-  }, [layout, data, view, power, cursor, selection]);
+    drawSpectrum(plot.current, layout, data, view, power, cursor, selection, channel);
+  }, [layout, data, view, power, cursor, selection, channel]);
 
   useChartWheel(plot, event => {if (!bookmarkSelection) gestures.wheel(event, true);});
   const fine = data.high - data.low < 20e6;
@@ -144,7 +144,8 @@ export function SpectrumPlot({toolsRef, data, view, gestures, bookmarks, inspect
         }} : gestures.surfaceHandlers('spectrum'))}
       />
       <PowerAxis layout={layout} power={power} setPower={setPower} clearCursor={() => gestures.setCursor(null)} />
-      {bookmarks && <BookmarkFlags bookmarks={bookmarks} data={data} layout={layout} power={power} inspect={inspectBookmarks} />}
+      {bookmarks && <BookmarkFlags bookmarks={bookmarks} data={data} layout={layout} power={power}
+        inspect={bookmarkActions.inspect} tune={bookmarkActions.tune} tuneDisabled={bookmarkActions.tuneDisabled} />}
       {bookmarkSelection && <BookmarkSelection {...bookmarkSelection} data={data} layout={layout} />}
     </>
   );
