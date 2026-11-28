@@ -39,7 +39,7 @@ test('a completed image set preserves all four sources and each raw peak trace',
   assert.deepEqual([...rawB.peaks], [-75, -61, -78, -68]);
   assert.deepEqual([...rawC.values], [-57, -56, -55, -58]);
   assert.deepEqual([...rawC.peaks], [-48, -47, -46, -49]);
-  assert.match(spectrumReadout(rawC, view, 0.25), /100\.7500 MHz · -56\.0 dBFS · 500 kHz\/bin/);
+  assert.equal(spectrumReadout(rawC, view, 0.25), '100.7500 MHz · 500 kHz/bin');
   assert.deepEqual([...selectSpectrumData(complete, null, 'B', false, true).values], [-70, -76]);
 });
 

@@ -128,14 +128,14 @@ export function selectSpectrumData(frame, view, source, waitingForImage, peakHol
 export function spectrumReadout({low, high, dataLow, dataHigh, values}, view, cursor) {
   const binWidth = (dataHigh - dataLow) / values.length;
   const resolution = view && values.length
-    ? ' · ' + (binWidth / 1000).toLocaleString(undefined, {maximumFractionDigits: 2}) + ' kHz/bin'
+    ? (binWidth / 1000).toLocaleString(undefined, {maximumFractionDigits: 2}) + ' kHz/bin'
     : '';
-  if (cursor == null || cursor < 0 || cursor > 1 || !values.length) return 'Power · dBFS' + resolution;
+  if (cursor == null || cursor < 0 || cursor > 1 || !values.length) return resolution;
 
   const hz = low + cursor * (high - low);
   const index = Math.min(Math.floor((hz - dataLow) / binWidth), values.length - 1);
-  const power = hz >= dataLow && hz <= dataHigh ? values[index] : undefined;
-  const readoutHz = Number.isFinite(power) ? dataLow + (index + 0.5) * binWidth : hz;
-  return frequencyLabel(readoutHz, high - low < 20e6)
-    + (Number.isFinite(power) ? ' · ' + power.toFixed(1) + ' dBFS' : ' · No data') + resolution;
+  const hasData = hz >= dataLow && hz <= dataHigh && Number.isFinite(values[index]);
+  const readoutHz = hasData ? dataLow + (index + 0.5) * binWidth : hz;
+  return [frequencyLabel(readoutHz, high - low < 20e6), hasData ? '' : 'No data', resolution]
+    .filter(Boolean).join(' · ');
 }

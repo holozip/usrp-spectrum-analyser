@@ -172,12 +172,11 @@ test('image rejection waits for a complete set, switches sources, and yields to 
   await expect(source).toBeVisible();
   await expect(detail).toContainText('One result per three sweeps');
   await plot.hover({position: {x: 340, y: 120}});
-  await expect(reading).toContainText('-70.0 dBFS');
+  await expect(reading).toContainText('MHz');
+  await expect(reading).not.toContainText('dBFS');
 
-  for (const [label, value] of [['Raw A', '-70.0'], ['Raw B', '-60.0'], ['Raw C', '-50.0']]) {
+  for (const label of ['Raw A', 'Raw B', 'Raw C']) {
     await source.selectOption({label});
-    await plot.hover({position: {x: 340, y: 120}});
-    await expect(reading).toContainText(value + ' dBFS');
     await expect(peak).toBeEnabled();
   }
   await expect(page.locator('#peak-key')).toBeVisible();
