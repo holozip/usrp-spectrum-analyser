@@ -13,11 +13,14 @@ except ImportError:
 
 
 AUDIO_RATE = 48_000
+AM_CARRIER_TARGET = 0.25
+AM_MAX_GAIN = 1_000
 BROADCAST_FM_MODES = ("wfm", "wfm_stereo")
 CHANNEL_MODES = {
     "usb": {"default": 2_700, "min": 500, "max": 4_000},
     "lsb": {"default": 2_700, "min": 500, "max": 4_000},
     "am": {"default": 10_000, "min": 3_000, "max": 20_000},
+    "acars": {"default": 10_000, "min": 8_000, "max": 20_000},
     "iq": {"default": 25_000, "min": 1_000, "max": 40_000},
     "nfm": {"default": 12_500, "min": 8_000, "max": 30_000},
     "wfm": {"default": 200_000, "min": 140_000, "max": 240_000},
@@ -166,6 +169,8 @@ class BroadcastFM:
 
 class ChannelDemodulator:
     def __init__(self, rate, offset, mode, bandwidth, deemphasis, rds_station=None):
+        if mode == "acars":
+            mode = "am"
         self.mode = mode
         sideband_offset = {"usb": bandwidth / 2, "lsb": -bandwidth / 2}.get(mode, 0)
         self.rotation = -2 * np.pi * (offset + sideband_offset) / rate
@@ -223,6 +228,11 @@ class ChannelDemodulator:
         highpass_hz = 180 if mode in ("nfm", "usb", "lsb") else 35
         self.highpass = signal.butter(1, highpass_hz, fs=AUDIO_RATE, btype="highpass")
         self.highpass_state = np.zeros(1)
+        if mode == "am":
+            carrier_pole = np.exp(-1 / (0.02 * AUDIO_RATE))
+            self.carrier_filter = ([1 - carrier_pole], [1, -carrier_pole])
+            # Start at unity gain while the channel filter fills.
+            self.carrier_state = np.array([AM_CARRIER_TARGET * carrier_pole])
         pole = np.exp(-1 / (AUDIO_RATE * deemphasis * 1e-6))
         self.deemphasis = ([1 - pole], [1, -pole])
         self.deemphasis_state = np.zeros(1)
@@ -277,16 +287,21 @@ class ChannelDemodulator:
             if self.broadcast:
                 return self.broadcast.process(baseband), power
         elif self.mode == "am":
-            baseband = np.abs(channel) * np.float32(5)
+            baseband = np.abs(channel)
         else:
             phase = self.sideband_phase + self.sideband_rotation * np.arange(len(channel))
             baseband = (channel * np.exp(1j * phase).astype(np.complex64)).real * np.float32(5)
             self.sideband_phase = (self.sideband_phase + self.sideband_rotation * len(channel)) % (2 * np.pi)
-        audio = self.output.process(baseband)
-        if len(audio):
-            audio, self.highpass_state = signal.lfilter(*self.highpass, audio, zi=self.highpass_state)
-            if self.mode == "nfm":
-                audio, self.deemphasis_state = signal.lfilter(*self.deemphasis, audio, zi=self.deemphasis_state)
+        baseband = self.output.process(baseband)
+        if not len(baseband):
+            return baseband, power
+        audio, self.highpass_state = signal.lfilter(*self.highpass, baseband, zi=self.highpass_state)
+        if self.mode == "am":
+            carrier, self.carrier_state = signal.lfilter(*self.carrier_filter, baseband, zi=self.carrier_state)
+            # Scale the AC envelope by the carrier, capping gain at 60 dB.
+            audio *= AM_CARRIER_TARGET / np.maximum(carrier, AM_CARRIER_TARGET / AM_MAX_GAIN)
+        elif self.mode == "nfm":
+            audio, self.deemphasis_state = signal.lfilter(*self.deemphasis, audio, zi=self.deemphasis_state)
         return audio, power
 
     def snapshot(self):

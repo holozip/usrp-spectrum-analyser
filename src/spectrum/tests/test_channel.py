@@ -135,6 +135,35 @@ class ChannelDspTests(unittest.TestCase):
                 if rejected:
                     self.assertGreater(fft.max(), 100 * fft[round(rejected * len(output) / AUDIO_RATE)])
 
+    def test_am_audio_level_tracks_carrier_strength_across_capture_blocks(self):
+        rate = 14_000_000
+        offset = 3_100_000
+        time = np.arange(rate // 2) / rate
+        carrier = np.exp(2j * np.pi * offset * time)
+        modulation = 0.2 * np.sin(2 * np.pi * 1200 * time)
+        for strength in (0.00032, 0.08):
+            with self.subTest(strength=strength):
+                iq = (strength * carrier * (1 + modulation)).astype(np.complex64)
+                dsp = ChannelDemodulator(rate, offset, "am", 10_000, 50)
+                blocks = []
+                for part in np.array_split(iq, 29):
+                    audio, power = dsp.process(part)
+                    blocks.append(audio)
+                audio = np.concatenate(blocks)[AUDIO_RATE // 4:]
+                self.assertAlmostEqual(float(np.sqrt(np.mean(audio ** 2))), 0.035, delta=0.004)
+                self.assertAlmostEqual(power, 20 * np.log10(strength), delta=0.2)
+
+    def test_am_suppresses_an_unmodulated_carrier_and_limits_gain_for_very_weak_signals(self):
+        rate = 1_200_000
+        offset = 200_000
+        time = np.arange(rate // 2) / rate
+        carrier = np.exp(2j * np.pi * offset * time)
+        weak_modulation = 1e-7 * (1 + np.sin(2 * np.pi * 1200 * time))
+        for envelope in (0.08, weak_modulation):
+            dsp = ChannelDemodulator(rate, offset, "am", 10_000, 50)
+            audio, _ = dsp.process((carrier * envelope).astype(np.complex64))
+            self.assertLess(np.max(np.abs(audio[AUDIO_RATE // 4:])), 0.001)
+
     def test_iq_keeps_complex_phase_at_the_output_rate(self):
         rate = 1_200_000
         offset = 240_000

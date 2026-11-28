@@ -706,10 +706,12 @@ def main():
                 kind, body = "application/json", json.dumps(frame, allow_nan=False).encode()
             elif self.path == "/api/listen":
                 return self.listen_json(200, sweep.listening.snapshot())
+            elif self.path == "/api/listen/acars":
+                return self.listen_json(200, sweep.listening.acars_log())
             elif self.path in ("/api/listen/audio", "/api/listen/iq"):
                 iq = self.path.endswith("/iq")
                 request, _, _, epoch = sweep.listening.read_settings()
-                if request is None or (request.mode == "iq") != iq:
+                if request is None or (request.mode != "iq" if iq else not request.audio_channels):
                     return self.listen_json(409, {"error": "Start a channel in IQ mode" if iq else "Start a channel in an audio mode"})
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")

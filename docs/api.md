@@ -157,11 +157,12 @@ leaves the channel outside the running capture.
 | POST | `/api/listen` | Activate or change a channel. Returns 409 if continuous capture is unavailable or the passband falls outside it. Send JSON `null` to stop processing, or `{"stop":"full"}` to also resume the full sweep. The response includes `survey_focus`. |
 | GET | `/api/listen/audio` | Stream framed signed 16-bit little-endian PCM at 48 kHz. The `X-Audio-Channels` response header is `1` for mono or `2` for interleaved left/right stereo. Requires an active audio mode. |
 | GET | `/api/listen/iq` | Stream framed complex float32, interleaved little-endian I then Q at 48 kS/s. Requires active IQ mode. |
+| GET | `/api/listen/acars` | Returns `{"messages": [...]}` with up to 100 VHF ACARS blocks, newest first. |
 
 `frequency_hz` is an integer in 70 MHz–6 GHz. It marks the carrier edge for
-`usb` and `lsb` and the filter centre for `nfm`, `wfm`, `wfm_stereo`, `am`, and `iq`.
+`usb` and `lsb` and the filter centre for `nfm`, `wfm`, `wfm_stereo`, `am`, `acars`, and `iq`.
 `filter_hz` is an optional integer. Defaults are 2,700 Hz for USB and LSB,
-12,500 Hz for NFM, 200,000 Hz for WFM mono, 220,000 Hz for WFM Stereo, 10,000 Hz for AM, and 25,000 Hz for IQ.
+12,500 Hz for NFM, 200,000 Hz for WFM mono, 220,000 Hz for WFM Stereo, 10,000 Hz for AM and ACARS, and 25,000 Hz for IQ.
 `squelch_dbfs` is an integer from −140 to 0 or `null` for off. FM audio accepts
 `deemphasis_us` of 50 (default) or 75. An acknowledged `revision` is applied
 when it matches `applied_revision`. Errors use `{"error":"…"}`.
@@ -173,6 +174,15 @@ or a new sequence with zero samples signals a discontinuity. A repeated
 zero-sample frame is a heartbeat. HTTP reads may split or combine frames.
 The stream ends when the channel stops or its format changes. Stereo fallback
 keeps two audio channels and sends the same mono signal to both.
+
+ACARS decodes the 2,400 bit/s AM-MSK waveform and accepts blocks that pass
+character parity and the block checksum. Squelch applies to audio modes.
+Each block contains a receiver-assigned `id`, UTC `received_at`, tuned
+`frequency_hz`, `aircraft` address, `mode`, `label`, `block_id`, and `text`.
+`more` indicates an ETB terminator in a multi-block message. Blocks remain
+separate and the in-memory log survives channel changes and browser reloads.
+`acars_revision` in the listen state increments for each received block.
+The receiver starts with an empty log on process restart.
 
 Both broadcast modes report `broadcast` telemetry in `/api/listen` and the
 `listen` object of `/api/sweep`. `stereo_locked` reports stereo audio lock,

@@ -24,6 +24,33 @@ p { color: #a7babd; margin: 5px 0 0; }
 .channel-form button[type="submit"] { background: #203d3b; border-color: #38605d; color: #b7ffeb; }
 .channel-output { padding-top: 12px; border-top: 1px solid #35454a; color: #a7babd; font-size: .82rem; }
 .channel-output input[type="range"] { width: 100%; margin: 0; accent-color: #66dec5; }
+.acars-log { margin-top: 14px; }
+.acars-log h3 { margin: 0 0 8px; font-size: .9rem; }
+.acars-toolbar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-bottom: 9px; }
+.acars-toolbar label { display: grid; gap: 3px; color: #a7babd; font-size: .75rem; }
+.acars-toolbar .acars-search { grid-column: 1 / -1; }
+.acars-toolbar input, .acars-toolbar select { box-sizing: border-box; width: 100%; min-width: 0;
+  padding: 5px 6px; font: inherit; color: #ecf4f3; background: #243136; border: 1px solid #53676b; border-radius: 5px; }
+.acars-aircraft + .acars-aircraft { margin-top: 10px; }
+.acars-aircraft h4 { margin: 0 0 5px; color: #a7babd; font-size: .8rem; }
+.acars-log ol { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.acars-log li { min-width: 0; padding: 8px; border: 1px solid #35454a; border-radius: 7px; }
+.acars-message-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: .75rem;
+  color: #a7babd; font-variant-numeric: tabular-nums; }
+.acars-message-header strong { color: #ecf4f3; }
+.acars-log .acars-title { margin: 5px 0; font-size: .88rem; }
+.acars-log .acars-checksum { color: #79e4ce; font-size: .75rem; }
+.acars-log .acars-message-status { color: #f6b76b; font-size: .75rem; }
+.acars-fields { display: grid; gap: 5px; margin: 8px 0; font-size: .78rem; }
+.acars-fields div { display: grid; grid-template-columns: minmax(88px, 1fr) minmax(0, 1.65fr); gap: 6px; }
+.acars-fields dt, .acars-fields dd { overflow-wrap: anywhere; }
+.acars-fields dt { color: #a7babd; }
+.acars-fields dd { margin: 0; font-variant-numeric: tabular-nums; }
+.acars-raw { margin-top: 7px; border-top: 1px solid #35454a; padding-top: 5px; }
+.acars-raw summary { width: fit-content; cursor: pointer; color: #79e4ce; font-size: .78rem; }
+.acars-raw-block { margin-top: 7px; padding: 6px; border-radius: 4px; background: #101519; }
+.acars-message-text { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  color: #ecf4f3; font: .75rem/1.4 ui-monospace, monospace; }
 .channel-signal { display: grid; gap: 5px; font-variant-numeric: tabular-nums; }
 .channel-signal dl { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 0; }
 .channel-signal dd { margin: 3px 0 0; color: #ecf4f3; font-weight: 600; }

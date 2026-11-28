@@ -14,6 +14,10 @@ export function fetchGainStages(signal) {
   return fetchJson('/api/gain-stages', {signal});
 }
 
+export function fetchAcarsLog(signal) {
+  return fetchJson('/api/listen/acars', {signal});
+}
+
 export function writeReceiverSetting(setting, value, signal) {
   return fetchJson('/api/' + setting, {
     method: 'POST',

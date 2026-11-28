@@ -1,14 +1,19 @@
 """Channel settings and bounded IQ/PCM delivery from the current capture."""
 from collections import deque
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from queue import Empty, Full, Queue
 import struct
 import threading
 
 import numpy as np
 
+from acars import AcarsDecoder
 from demodulation import AUDIO_RATE, BROADCAST_FM_MODES, CHANNEL_MODES, ChannelDemodulator, signal
 from rds import RdsStation
+
+
+ACARS_LOG_LIMIT = 100
 
 
 @dataclass(frozen=True)
@@ -21,11 +26,11 @@ class Tune:
 
     @property
     def audio_channels(self):
-        return 0 if self.mode == "iq" else 2 if self.mode == "wfm_stereo" else 1
+        return 0 if self.mode in ("iq", "acars") else 2 if self.mode == "wfm_stereo" else 1
 
     @property
     def sample_size(self):
-        return 2 * self.audio_channels if self.audio_channels else 8
+        return 8 if self.mode == "iq" else 2 * self.audio_channels
 
     @property
     def edges(self):
@@ -77,7 +82,7 @@ def validate_tune(value, low, high):
         raise ValueError("Expected a channel frequency and mode, with optional filter, squelch and de-emphasis")
     mode = value["mode"]
     if not isinstance(mode, str) or mode not in CHANNEL_MODES:
-        raise ValueError("Choose USB, LSB, NFM, WFM, WFM Stereo, AM or IQ")
+        raise ValueError("Choose USB, LSB, NFM, WFM, WFM Stereo, AM, ACARS or IQ")
     preset = CHANNEL_MODES[mode]
     width = value.get("filter_hz", preset["default"])
     if type(width) is not int or not preset["min"] <= width <= preset["max"]:
@@ -113,6 +118,8 @@ class Listening:
         self.squelched = False
         self.broadcast = None
         self.rds_station = None
+        self.acars_messages = deque(maxlen=ACARS_LOG_LIMIT)
+        self.acars_revision = 0
         self.error = None
 
     def snapshot(self):
@@ -124,7 +131,12 @@ class Listening:
                     "power_dbfs": self.power, "snr_db": self.snr,
                     "squelched": self.squelched, "audio_rate_hz": AUDIO_RATE,
                     "audio_channels": self.request.audio_channels if self.request else 0,
-                    "audio_epoch": self.epoch, "broadcast": self.broadcast, "error": self.error}
+                    "audio_epoch": self.epoch, "broadcast": self.broadcast, "acars_revision": self.acars_revision,
+                    "error": self.error}
+
+    def acars_log(self):
+        with self.condition:
+            return {"messages": list(reversed(self.acars_messages))}
 
     def configure(self, request, focus):
         with self.condition:
@@ -187,10 +199,11 @@ class Listening:
             if rds and rds.get("pi") else None
 
     def append(self, payload):
-        self.sequence += 1
         sample_size = self.request.sample_size if self.request else 2
-        packet = struct.pack("<III", self.epoch, self.sequence, len(payload) // sample_size) + payload
-        self.frames.append((self.sequence, packet))
+        if sample_size:
+            self.sequence += 1
+            packet = struct.pack("<III", self.epoch, self.sequence, len(payload) // sample_size) + payload
+            self.frames.append((self.sequence, packet))
         self.condition.notify_all()
 
     def read_settings(self, for_audio=False):
@@ -204,7 +217,7 @@ class Listening:
                 return self.rds_station
             return None
 
-    def publish(self, revision, epoch, pcm, power, squelched, broadcast=None, snr=None):
+    def publish(self, revision, epoch, pcm, power, squelched, broadcast=None, snr=None, acars=()):
         with self.condition:
             if revision == self.revision and epoch == self.epoch:
                 self.applied_revision = revision
@@ -212,7 +225,15 @@ class Listening:
                 self.snr = round(snr, 1) if snr is not None else None
                 self.squelched = squelched
                 self.broadcast = broadcast
-                self.append(pcm)
+                if self.request and self.request.mode == "acars":
+                    for message in acars:
+                        self.acars_revision += 1
+                        self.acars_messages.append({
+                            **message, "id": self.acars_revision, "frequency_hz": self.request.frequency_hz,
+                            "received_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                        })
+                else:
+                    self.append(pcm)
 
     def mark_gap(self, revision, epoch):
         with self.condition:
@@ -309,6 +330,7 @@ class ChannelTap:
         previous = 0
         version = None
         dsp = None
+        acars = None
         while not self.stopping.is_set():
             try:
                 serial, block_version, samples = self.queue.get(timeout=0.04)
@@ -325,13 +347,17 @@ class ChannelTap:
                     dsp = ChannelDemodulator(capture.rate_hz, request.frequency_hz - capture.center_hz,
                                              request.mode, request.filter_hz, request.deemphasis_us,
                                              rds_station=self.listening.read_rds_station(revision, epoch))
+                    acars = AcarsDecoder(AUDIO_RATE) if request.mode == "acars" else None
                     version = block_version
                 output, power = dsp.process(samples)
+                messages = acars.process(output) if acars is not None else ()
             except Exception as error:
                 self.listening.fail(revision, epoch, error)
                 continue
             previous = serial
-            if request.mode == "iq":
+            if acars is not None:
+                self.listening.publish(revision, epoch, b"", power, False, snr=dsp.snr_db, acars=messages)
+            elif request.mode == "iq":
                 self.listening.publish(revision, epoch, output.astype("<c8", copy=False).tobytes(),
                                        power, False, snr=dsp.snr_db)
             else:

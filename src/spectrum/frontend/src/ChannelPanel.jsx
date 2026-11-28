@@ -1,8 +1,10 @@
-import {useEffect, useEffectEvent, useRef, useState} from 'react';
+import {lazy, Suspense, useEffect, useEffectEvent, useRef, useState} from 'react';
 import {createChannelAudio} from './channelAudio.js';
 import {writeChannelSetting} from './receiverApi.js';
 import {channelEdges, FULL_RANGE, sameRange} from './spectrumData.js';
 import {SidebarPanel} from './SidebarPanel.jsx';
+
+const AcarsLog = lazy(() => import('./AcarsLog.jsx'));
 
 const MODES = {
   usb: {label: 'USB · Upper sideband', width: 2700, min: 500, max: 4000},
@@ -11,8 +13,13 @@ const MODES = {
   wfm: {label: 'WFM · Broadcast FM mono', width: 200000, min: 140000, max: 240000},
   wfm_stereo: {label: 'WFM Stereo · Broadcast FM', width: 220000, min: 160000, max: 300000},
   am: {label: 'AM · Amplitude modulation', width: 10000, min: 3000, max: 20000},
+  acars: {label: 'ACARS · Aircraft data link', width: 10000, min: 8000, max: 20000},
   iq: {label: 'IQ · Complex samples', width: 25000, min: 1000, max: 40000},
 };
+
+function isAudioMode(mode) {
+  return Boolean(mode && mode !== 'iq' && mode !== 'acars');
+}
 
 export function defaultChannelSetting(frequency, mode, bandwidth) {
   frequency ??= 98100000;
@@ -37,7 +44,7 @@ function settingsFromDraft(draft) {
   return {mode: draft.mode,
     frequency_hz: Math.round(Number(draft.frequency_text ?? draft.frequency_hz / 1e6) * 1e6),
     filter_hz: Math.round(Number(draft.filter_text ?? draft.filter_hz / 1000) * 1000),
-    squelch_dbfs: draft.mode === 'iq' || draft.squelch_dbfs == null || draft.squelch_dbfs === ''
+    squelch_dbfs: !isAudioMode(draft.mode) || draft.squelch_dbfs == null || draft.squelch_dbfs === ''
       ? null : Number(draft.squelch_dbfs),
     deemphasis_us: draft.deemphasis_us};
 }
@@ -63,7 +70,7 @@ export function useChannelReceiver(state, confirmSetting, surveyView, requestedF
   const [lastSelection, setLastSelection] = useState(null);
   const capture = state?.capture && sameRange(state.capture.focus, requestedFocus) ? state.capture : null;
   const active = Boolean(state?.settings);
-  const isAudio = active && state.settings.mode !== 'iq';
+  const isAudio = isAudioMode(state?.settings?.mode);
   const revision = state?.revision;
   const center = surveyView ? (surveyView[0] + surveyView[1]) / 2 : undefined;
   const initial = state?.settings ?? lastSelection ?? defaultChannelSetting(center);
@@ -122,7 +129,7 @@ export function useChannelReceiver(state, confirmSetting, surveyView, requestedF
     sending.current = true;
     setPending(true);
     setError(null);
-    const output = playAudio && settings?.mode !== 'iq' ? openAudio() : player.current;
+    const output = playAudio && isAudioMode(settings?.mode) ? openAudio() : player.current;
     output?.reset(Infinity);
     if (output) setAudio('Buffering audio…');
     try {
@@ -130,7 +137,7 @@ export function useChannelReceiver(state, confirmSetting, surveyView, requestedF
       confirmSetting('listen', result);
       if (result.settings) setLastSelection(result.settings);
       else setLiveEdit(null);
-      if (result.settings && result.settings.mode !== 'iq') {
+      if (isAudioMode(result.settings?.mode)) {
         output?.reset(result.audio_epoch);
         void output?.play();
       } else {
@@ -206,10 +213,11 @@ function ChannelForm({draft, edit, pending, active, canStart, tune}) {
   const mode = draft.mode;
   const preset = MODES[mode];
   const fm = mode === 'nfm' || mode === 'wfm' || mode === 'wfm_stereo';
+  const audio = isAudioMode(mode);
 
   function submit(event) {
     event.preventDefault();
-    if (!active && canStart) void tune(settingsFromDraft(draft), mode !== 'iq');
+    if (!active && canStart) void tune(settingsFromDraft(draft), audio);
   }
 
   return <form className="channel-form" onSubmit={submit} aria-label="Channel settings">
@@ -223,13 +231,15 @@ function ChannelForm({draft, edit, pending, active, canStart, tune}) {
     <label>Filter (kHz)<input name="filter" type="number" min={preset.min / 1000} max={preset.max / 1000}
       step="0.001" required value={draft.filter_text ?? draft.filter_hz / 1000}
       onChange={event => edit({filter_text: event.target.value})} /></label>
-    {mode !== 'iq' && <label>Squelch (dBFS)<input name="squelch" type="number" min="-140" max="0" step="1" placeholder="Off"
+    {audio && <label>Squelch (dBFS)<input name="squelch" type="number" min="-140" max="0" step="1" placeholder="Off"
       value={draft.squelch_dbfs ?? ''} onChange={event => edit({squelch_dbfs: event.target.value})} /></label>}
     {fm && <label>De-emphasis<select name="deemphasis" value={draft.deemphasis_us}
       onChange={event => edit({deemphasis_us: Number(event.target.value)}, 0)}>
       <option value="50">50 µs</option><option value="75">75 µs</option>
     </select></label>}
-    {!active && <button type="submit" disabled={pending || !canStart}>{mode === 'iq' ? 'Start IQ stream' : 'Listen'}</button>}
+    {!active && <button type="submit" disabled={pending || !canStart}>
+      {mode === 'acars' ? 'Start ACARS decoding' : mode === 'iq' ? 'Start IQ stream' : 'Listen'}
+    </button>}
   </form>;
 }
 
@@ -346,13 +356,14 @@ export function ChannelPanel({receiver, stop, close}) {
   const {active, state, capture, pending, error, configure, audio, volume, changeVolume, play, pause, draft, edit, selection} = receiver;
   const ready = validSettings(selection) && fitsCapture(selection, capture);
   const iq = active && state.settings.mode === 'iq';
+  const acars = active && state.settings.mode === 'acars';
   const stereo = active && state.settings.mode === 'wfm_stereo';
   const broadcast = stereo || (active && state.settings.mode === 'wfm');
   const tuning = active && (pending || state.applied_revision !== state.revision);
   const power = tuning ? null : state?.power_dbfs;
   const snr = tuning ? null : state?.snr_db;
   const status = active && (!fitsCapture(state.settings, capture) ? 'Waiting for the selected channel in the IQ capture'
-    : state.error ? 'Demodulation paused' : tuning ? 'Starting…' : iq ? 'Streaming IQ'
+    : state.error ? 'Demodulation paused' : tuning ? 'Starting…' : iq ? 'Streaming IQ' : acars ? 'Decoding ACARS'
       : state.squelched ? 'Squelched' : audio || 'Audio paused');
   return <SidebarPanel id="channel-panel" label="Channel controls" title="Channel"
     closeLabel="Close channel controls" close={close}>
@@ -372,15 +383,20 @@ export function ChannelPanel({receiver, stop, close}) {
       </div>
       {broadcast && <BroadcastDetails stereo={stereo} broadcast={state.broadcast} />}
       {iq ? <label>IQ stream URL<input readOnly value={new URL('/api/listen/iq', window.location.href).href}
-        onFocus={event => event.target.select()} /><span>48 kS/s · complex float32</span></label> : <>
+        onFocus={event => event.target.select()} /><span>48 kS/s · complex float32</span></label> : !acars && <>
         <label>Volume<input type="range" min="0" max="1" step="0.01" value={volume}
           onChange={event => changeVolume(event.target.valueAsNumber)} /></label>
         {audio && audio !== 'Could not start browser audio'
           ? <button type="button" onClick={pause}>Pause audio</button>
           : <button type="button" disabled={pending} onClick={play}>Play audio</button>}
       </>}
-      <button type="button" disabled={pending} onClick={stop}>{iq ? 'Stop IQ stream' : 'Stop listening'}</button>
+      <button type="button" disabled={pending} onClick={stop}>
+        {acars ? 'Stop ACARS decoding' : iq ? 'Stop IQ stream' : 'Stop listening'}
+      </button>
     </div>}
+    {(acars || (!active && draft.mode === 'acars')) && <Suspense fallback={<p>Loading ACARS messages…</p>}>
+      <AcarsLog revision={state?.acars_revision} decoding={acars} />
+    </Suspense>}
     {(error || state?.error) && <p className="input-error" role="alert">{error || state.error}</p>}
   </SidebarPanel>;
 }

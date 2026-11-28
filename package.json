@@ -15,6 +15,7 @@
     "test:browser": "playwright test"
   },
   "dependencies": {
+    "@airframes/acars-decoder": "github:holozip/acars-decoder-typescript#db14e80d500108a47f7df4e899f408055b1f3c84",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },

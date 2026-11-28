@@ -16,6 +16,118 @@ async function dominantTone(page, channel = 0) {
   }, channel);
 }
 
+test('ACARS shows new messages and keeps the log visible after stopping', async ({page, request}) => {
+  await stopReceiver(request);
+  const focus = [131775000, 131875000];
+  expect((await request.post('/api/focus', {data: focus})).ok()).toBe(true);
+  await expect.poll(async () => (await (await request.get('/api/listen')).json()).capture?.focus).toEqual(focus);
+
+  const messages = [];
+  await page.route('**/api/listen/acars', route => messages.length ? route.fulfill({json: {messages}}) : route.continue());
+  await page.route('**/api/sweep', async route => {
+    const response = await route.fetch();
+    const metadata = await response.json();
+    metadata.listen.acars_revision = messages.length;
+    await route.fulfill({response, json: metadata});
+  });
+
+  try {
+    await page.goto('/');
+    await page.getByRole('button', {name: 'Channel', exact: true}).click();
+    const panel = page.getByRole('complementary', {name: 'Channel controls'});
+    await panel.getByLabel('Demodulator').selectOption('acars');
+    await expect(panel.getByLabel('Filter (kHz)')).toHaveValue('10');
+    await panel.getByRole('button', {name: 'Start ACARS decoding'}).click();
+    await expect(panel.getByRole('status')).toHaveText('Decoding ACARS');
+    await expect(panel.getByText('Waiting for a valid message.')).toBeVisible();
+    await expect(panel.getByRole('button', {name: 'Play audio'})).toHaveCount(0);
+    for (const route of ['audio', 'iq']) {
+      expect((await request.get('/api/listen/' + route)).status()).toBe(409);
+    }
+
+    messages.unshift({id: 1, received_at: '2026-11-28T15:15:00.000Z', frequency_hz: 131825000,
+      aircraft: 'N123AB', label: 'Q0', text: '<b>Test message</b>', more: false});
+    const log = panel.getByRole('list', {name: 'Received ACARS messages'});
+    await expect(log.getByText('N123AB', {exact: true})).toBeVisible();
+    await expect(log.getByText('<b>Test message</b>', {exact: true})).toBeHidden();
+    await log.getByText('Raw text', {exact: true}).click();
+    await expect(log.getByText('<b>Test message</b>', {exact: true})).toBeVisible();
+
+    const report = {frequency_hz: 131825000, aircraft: 'N123AB', label: 'H1', mode: '2'};
+    messages.unshift({...report, id: 2, received_at: '2026-11-28T15:15:10.000Z', block_id: '5', more: true,
+      text: 'F18AAC0861#M1BPOSN53431W001594,TNT,154057,320,RIBEL,154325,ORSUM,M54,21679,1658/RP:DA:EGLL:AA:CYVR:R:09R:F:RIBEL..BOPU'});
+    const position = log.getByRole('listitem').filter({hasText: 'AC0861'});
+    await expect(position.getByText('More blocks follow')).toBeVisible();
+    await position.getByText('Raw text', {exact: true}).click();
+    await expect(position.locator('pre')).toHaveCount(1);
+    messages.unshift({...report, id: 3, received_at: '2026-11-28T15:15:11.000Z', block_id: '6', more: false,
+      text: 'F18BAC0861#M1BT..MERYT6D9C'});
+    await expect(position).toHaveCount(1);
+    await expect(position.getByRole('heading', {name: 'Position Report'})).toBeVisible();
+    await expect(position.getByText('RIBEL >> BOPUT >> MERYT')).toBeVisible();
+    await expect(position.getByText('32000 feet')).toBeVisible();
+    await expect(position.getByText('Payload checksum verified')).toBeVisible();
+    await expect(position.getByText('Joined payload')).toBeVisible();
+    await expect(position.locator('pre')).toHaveCount(3);
+    await expect(position.locator('pre').nth(0)).toContainText('RIBEL..BOPUT..MERYT');
+    await expect(position.locator('pre').nth(2)).toHaveText('F18BAC0861#M1BT..MERYT6D9C');
+    await expect(position.getByText('More blocks follow')).toHaveCount(0);
+
+    const wilco = 'L03AAC0857/SOUCAYA.AT1.C-FIUR6312FE8E00ABDD';
+    messages.unshift({...report, id: 4, label: 'BA', aircraft: 'C-FIUR',
+      received_at: '2026-11-28T15:15:12.000Z', block_id: '7', more: false, text: wilco});
+    const reply = log.getByRole('listitem').filter({hasText: 'AC0857'});
+    await expect(reply.getByRole('heading', {name: 'ACARS message'})).toBeVisible();
+    await expect(reply.getByText('Payload checksum verified')).toHaveCount(0);
+    await reply.getByText('Raw text', {exact: true}).click();
+    await expect(reply.locator('pre')).toHaveText(wilco);
+
+    const avionics = {...report, aircraft: 'C-FIUR'};
+    messages.unshift({...avionics, id: 5, received_at: '2026-11-28T15:57:48.000Z', block_id: '8', more: false,
+      text: 'F14AAC0857#M1BPOSN53335W001569,TIMPO,155744,340,RIBEL,160118,ASLIB,M57,21876,1310'});
+    messages.unshift({...avionics, id: 6, received_at: '2026-11-28T15:58:07.000Z', block_id: '9', more: true,
+      text: 'O73AAC0857#10BSB016BA_262100-282  3388   20002\nER155800 -04  30  9-28234002818000M07'});
+    messages.unshift({...avionics, id: 7, received_at: '2026-11-28T15:58:15.000Z', block_id: '0', more: false,
+      text: 'O73BAC0857#10B\n  60  69 493  710  640    0    0000000000FA8'});
+    const onboard = log.getByRole('listitem').filter({hasText: 'Message O73'});
+    await expect(onboard.getByRole('heading', {name: 'ACARS message'})).toBeVisible();
+    await onboard.getByText('Raw text', {exact: true}).click();
+    await expect(onboard.getByText('Joined payload')).toBeVisible();
+    await expect(onboard.locator('pre')).toHaveCount(3);
+    await expect(onboard.locator('pre').nth(0)).toContainText('9-28234002818000M07');
+    await expect(onboard.locator('pre').nth(1)).toContainText('O73AAC0857#10B');
+    await expect(onboard.locator('pre').nth(2)).toContainText('O73BAC0857#10B');
+
+    messages.unshift({...avionics, id: 8, label: 'BA', received_at: '2026-11-28T16:00:00.000Z',
+      block_id: '1', more: false, text: wilco.replace('L03', 'L04').replace('ABDD', 'ABDC')});
+    await expect(log.getByText('Label BA')).toHaveCount(2);
+
+    const search = panel.getByRole('searchbox', {name: 'Search messages'});
+    await search.fill('c-fiur sb016');
+    await expect(log.getByRole('listitem')).toHaveCount(1);
+    await expect(onboard).toBeVisible();
+    await panel.getByLabel('ACARS label').selectOption('BA');
+    await expect(panel.getByText('No matching messages.')).toBeVisible();
+    await search.clear();
+    await expect(log.getByRole('listitem')).toHaveCount(2);
+    await panel.getByLabel('ACARS label').selectOption('');
+    await panel.getByLabel('Group messages').selectOption('aircraft');
+    await expect(panel.getByRole('list', {name: 'ACARS messages for C-FIUR'}).getByRole('listitem')).toHaveCount(4);
+    const otherAircraft = panel.getByRole('list', {name: 'ACARS messages for N123AB'});
+    await expect(otherAircraft.getByRole('listitem')).toHaveCount(2);
+    await search.fill('test message');
+    await expect(otherAircraft.getByRole('listitem')).toHaveCount(1);
+    await panel.getByLabel('Group messages').selectOption('time');
+    await search.clear();
+
+    await panel.getByRole('button', {name: 'Stop ACARS decoding'}).click();
+    await expect(panel.getByRole('button', {name: 'Start ACARS decoding'})).toBeVisible();
+    await expect(log.getByText('Label Q0')).toBeVisible();
+  } finally {
+    await stopReceiver(request);
+  }
+});
+
 test('channel selection and demodulation reuse the running IQ capture', async ({page, request}) => {
   await stopReceiver(request);
   const initial = {mode: 'wfm', frequency_hz: 98100000};
@@ -75,7 +187,7 @@ test('channel selection and demodulation reuse the running IQ capture', async ({
     const spectrum = page.locator('#plot');
     const surveyLabel = await spectrum.getAttribute('aria-label');
     await expect(panel.getByLabel('Frequency (MHz)')).toHaveValue('98.4');
-    await expect(panel.getByLabel('Demodulator').locator('option')).toHaveCount(7);
+    await expect(panel.getByLabel('Demodulator').locator('option')).toHaveCount(8);
     const plot = await spectrum.boundingBox();
     expect((await panel.boundingBox()).x).toBeGreaterThanOrEqual(plot.x + plot.width);
     await page.mouse.click(plot.x + 58 + (plot.width - 78) * 0.25, plot.y + plot.height / 2);
