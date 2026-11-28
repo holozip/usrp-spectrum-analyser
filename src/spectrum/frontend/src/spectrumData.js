@@ -105,7 +105,7 @@ export function decodeDetail(frame, buffer) {
 
 export function keepImageSet(frame, previous) {
   return Boolean(frame.image_leg && !frame.image_set && previous?.imageSet
-    && previous.gain === frame.gain && previous.fft_averages === frame.fft_averages
+    && previous.antenna === frame.antenna && previous.gain === frame.gain && previous.fft_averages === frame.fft_averages
     && sameRange(previous.capture_focus, frame.capture_focus));
 }
 

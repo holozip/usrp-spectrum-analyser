@@ -98,7 +98,7 @@ export function createWaterfallCanvas(canvas, container, onSignalAvailability) {
   function addCapture(frame, data, view, frozen) {
     if (!frame?.number) return;
     const {low, high, dataLow, dataHigh, leg, values} = data;
-    const key = [low, high, dataLow, dataHigh, frame.gain, frame.fft_averages, leg].join('/');
+    const key = [low, high, dataLow, dataHigh, frame.antenna, frame.gain, frame.fft_averages, leg].join('/');
     const {height} = canvas;
     if (key !== captureKey || frame.number < lastFrame) {
       context.clearRect(0, 0, width, height);

@@ -27,7 +27,7 @@ For the live dashboard, install UHD with its Python bindings on the computer con
 python3 src/spectrum/server.py --antenna TX/RX --fpga-band-sweep
 ```
 
-Open the [local dashboard](http://127.0.0.1:8000). The live command selects channel 0's TX/RX input and loads the bundled FPGA image into RAM. Use `--antenna RX2` for the other input. Omit `--fpga-band-sweep` for ordinary UHD operation.
+Open the [local dashboard](http://127.0.0.1:8000). The live command starts on **RF A · TX/RX** and loads the bundled FPGA image into RAM. Use **RX antenna** in the dashboard to switch between TX/RX and RX2 on RF A or RF B. A switch briefly pauses capture while the new input starts. To set the starting port, use `--antenna A:TX/RX`, `A:RX2`, `B:TX/RX`, or `B:RX2`. Omit `--fpga-band-sweep` for ordinary UHD operation.
 
 Vite builds into `build/spectrum/`. The Python process serves that directory's dashboard at `/`, its bundles at `/assets/`, and the receiver API at `/api/` on the same loopback port. Build in the checkout or copy the entire `build/spectrum/` directory to the same location in the target checkout. Node is only needed where you build or develop the frontend. The dashboard assumes the URL base is `/` and has one page, with no route fallback needed.
 

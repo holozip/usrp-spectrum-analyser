@@ -53,6 +53,7 @@ test('partial image sets retain a compatible completed capture only', () => {
   const next = {image_leg: 'A', gain: 35, fft_averages: 8, capture_focus: [100e6, 102e6]};
   assert.equal(keepImageSet(next, previous), true);
   assert.equal(keepImageSet({...next, fft_averages: 4}, previous), false);
+  assert.equal(keepImageSet({...next, antenna: 'B:RX2'}, {...previous, antenna: 'A:RX2'}), false);
   assert.equal(keepImageSet({...next, capture_focus: null}, previous), false);
   assert.equal(keepImageSet({...next, image_set: true}, previous), false);
 });

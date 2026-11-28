@@ -15,7 +15,7 @@ async function mockReceiver(page, overrides = {}) {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === 'POST') {
-      const setting = {'/api/focus': 'focus', '/api/gain': 'gain', '/api/averages': 'averages',
+      const setting = {'/api/focus': 'focus', '/api/antenna': 'antenna', '/api/gain': 'gain', '/api/averages': 'averages',
         '/api/image-reject': 'imageRequested'}[path];
       const value = request.postDataJSON();
       writes.push({setting, value});
@@ -61,6 +61,8 @@ async function mockReceiver(page, overrides = {}) {
         error: state.receiverError, focus: state.focus, capture_focus: state.focus,
         low, high, detail_count: trace.length, peaks, seconds: 0.08, hops: 5,
         gain_table: 'unified', gain: state.gain, requested_gain: state.gain,
+        antenna_options: state.antennaOptions, requested_antenna: state.antenna,
+        antenna: state.captureAntenna ?? state.antenna, antenna_error: state.antennaError,
         fft_averages: state.averages, requested_averages: state.averages,
         image_reject_available: true, image_reject_requested: state.imageRequested, image_leg: imageLeg,
         image_set: imageSet, continuous: state.continuous, rate_hz: 14e6, fft_size: 32768, gaps: 2,
@@ -75,6 +77,26 @@ async function mockReceiver(page, overrides = {}) {
 
   return {state, writes};
 }
+
+test('the RX antenna selector requests one of four inputs and waits for its capture', async ({page}) => {
+  const antennaOptions = ['A:TX/RX', 'A:RX2', 'B:TX/RX', 'B:RX2'];
+  const {state, writes} = await mockReceiver(page, {antennaOptions, antenna: 'A:TX/RX', captureAntenna: 'A:TX/RX'});
+  await page.goto('/');
+  const antenna = page.getByRole('combobox', {name: 'RX antenna'});
+  const detail = page.locator('#detail');
+  await expect(antenna.locator('option')).toHaveCount(4);
+  await expect(antenna).toHaveValue('A:TX/RX');
+  await antenna.selectOption('B:RX2');
+  await expect(detail).toHaveText('Switching RX antenna…');
+  expect(writes).toEqual([{setting: 'antenna', value: 'B:RX2'}]);
+  state.captureAntenna = 'B:RX2';
+  await expect(detail).toContainText('RF B · RX2');
+
+  state.fail = 'antenna';
+  await antenna.selectOption('A:RX2');
+  await expect(detail).toContainText('Could not change RX antenna.');
+  await expect(antenna).toHaveValue('B:RX2');
+});
 
 test('live gain previews unified stages and FFT averages preserve invalid or failed edits', async ({page}) => {
   const {state, writes} = await mockReceiver(page);

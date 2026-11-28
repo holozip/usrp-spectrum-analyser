@@ -117,14 +117,17 @@ continue omitting the two new fields.
 | GET | `/api/gain-stages` | Unified gain-stage rows, or an empty array with stock tables. |
 | GET | `/api/detail/{number}` | Little-endian float32 detail; optional `?peaks=1&image=1` appends available traces. |
 | POST | `/api/focus` | JSON `[low_hz, high_hz]` within 70 MHz–6 GHz, or `null` for full spectrum. |
+| POST | `/api/antenna` | JSON string from the live receiver's `antenna_options`, for example `"B:RX2"`. |
 | POST | `/api/gain` | JSON number 0–76 dB; live receiver only. |
 | POST | `/api/averages` | JSON integer 1–32; live receiver only. |
 | POST | `/api/image-reject` | JSON boolean; available live paired 56 MS/s capture only. |
 
 Receiver-setting POSTs retain their existing 128-byte body limit and return
 the accepted JSON value. Their legacy errors are HTML, unlike the bookmark
-API's structured JSON errors. Gain and averages expose requested versus
-captured values; changing a setting can take a capture/pass to appear.
+API's structured JSON errors. Gain, averages and antenna expose requested
+versus captured values. On an antenna switch, wait for `antenna` to match
+`requested_antenna` in `/api/sweep`. `antenna_error` reports a failed hardware switch.
+
 The generic `/api/focus` endpoint does not force another browser's local
 view to navigate; use bookmark recall for synchronised bookmark navigation.
 Freeze, trace selection, panel layout and colour ranges remain browser-local;

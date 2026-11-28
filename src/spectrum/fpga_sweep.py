@@ -135,6 +135,14 @@ class BandSweep:
     def tune(self, center):
         return self.receiver.tune(center)
 
+    def select_antenna(self, antenna, gain):
+        # Radio 0 still owns the mailbox. The AD9361 RX LO is shared by both
+        # chains, so Fast Lock keeps the same profiles with either streamer.
+        self.control.leave()
+        self.receiver.select_antenna(antenna, gain)
+        self.calibration_count = self.control.calibration_status()[0]
+        self.after_continuous = True
+
     def read_calibration(self, actual, required):
         count, _, timed_out = self.control.calibration_status()
         change = (count - self.calibration_count) % 256

@@ -137,20 +137,36 @@ function AveragesControl({requested, setting}) {
   );
 }
 
-export function ReceiverControls({latest, gain, averages, canReset, resetRange}) {
+export function antennaLabel(value) {
+  const [chain, port] = value.split(':');
+  return `RF ${chain} · ${port}`;
+}
+
+export function ReceiverControls({latest, antenna, gain, averages, canReset, resetRange}) {
   return (
-    <header>
-      <div>
-        {latest?.requested_gain != null && (
-          <GainControl requested={latest.requested_gain} table={latest.gain_table} setting={gain} />
-        )}
-      </div>
-      <div className="view-controls">
-        {latest?.requested_averages != null && (
-          <AveragesControl requested={latest.requested_averages} setting={averages} />
-        )}
-        <button id="full-spectrum" type="button" disabled={!canReset} onClick={resetRange}>Full spectrum</button>
-      </div>
-    </header>
+    <div className="receiver-controls">
+      <header>
+        <div>
+          {latest?.requested_gain != null && (
+            <GainControl requested={latest.requested_gain} table={latest.gain_table} setting={gain} />
+          )}
+        </div>
+        <div className="view-controls">
+          {latest?.antenna_options?.length > 0 && <label id="antenna-control">
+            RX antenna{' '}
+            <select id="rx-antenna" value={antenna.pendingValue ?? latest.requested_antenna}
+              disabled={antenna.pendingValue !== null}
+              aria-describedby={antenna.error || latest.antenna_error ? 'detail' : undefined}
+              onChange={event => void antenna.save(event.currentTarget.value)}>
+              {latest.antenna_options.map(value => <option key={value} value={value}>{antennaLabel(value)}</option>)}
+            </select>
+          </label>}
+          {latest?.requested_averages != null && (
+            <AveragesControl requested={latest.requested_averages} setting={averages} />
+          )}
+          <button id="full-spectrum" type="button" disabled={!canReset} onClick={resetRange}>Full spectrum</button>
+        </div>
+      </header>
+    </div>
   );
 }

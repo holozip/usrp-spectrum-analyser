@@ -31,6 +31,8 @@ UNIFIED_GAIN_ROM = REPO_ROOT / "src/firmware/rtl/control/unified_rx_gain.mem"
 PEAK_BUCKET_SECONDS = 0.2
 CONTINUOUS_UPDATE_SECONDS = 0.04
 DETAIL_WIDTH = (HIGH - LOW) / DETAIL_BINS
+RX_PORTS = ("TX/RX", "RX2")
+RX_ANTENNAS = tuple(f"{side}:{port}" for side in "AB" for port in RX_PORTS)
 
 
 def captures(rate, bandwidth, paired=False):
@@ -111,30 +113,70 @@ def continuous_plan(focus, rate, bandwidth):
 
 
 class Receiver:
-    def __init__(self, args):
+    def __init__(self, args, antenna):
         import uhd
 
         self.uhd = uhd
         self.radio = uhd.usrp.MultiUSRP(args.device)
+        if self.radio.get_mboard_name() == "B210":
+            self.radio.set_rx_subdev_spec(uhd.usrp.SubdevSpec("A:A A:B"))
+        self.antennas = {}
+        for channel, side in enumerate("AB"[:self.radio.get_rx_num_channels()]):
+            ports = self.radio.get_rx_antennas(channel)
+            self.antennas.update({f"{side}:{port}": (channel, port) for port in RX_PORTS if port in ports})
+        if antenna not in self.antennas:
+            raise RuntimeError(f"RX antenna {antenna} is unavailable on this receiver")
+        self.channel, port = self.antennas[antenna]
         if args.rate == MAX_RATE:
             self.radio.set_master_clock_rate(MAX_RATE * 1e6)
-        self.radio.set_rx_rate(args.rate * 1e6, 0)
-        self.rate = self.radio.get_rx_rate(0)
+        self.radio.set_rx_rate(args.rate * 1e6, self.channel)
+        self.rate = self.radio.get_rx_rate(self.channel)
         self.stream_rate = self.rate
         self.master_clock = self.radio.get_master_clock_rate()
-        self.radio.set_rx_bandwidth(min(self.rate, MAX_RATE * 1e6), 0)
-        self.bandwidth = self.radio.get_rx_bandwidth(0)
-        self.radio.set_rx_antenna(args.antenna, 0)
-        self.radio.set_rx_gain(args.gain, 0)
-        stream_args = uhd.usrp.StreamArgs("fc32", "sc16")
-        stream_args.channels = [0]
-        self.stream = self.radio.get_rx_stream(stream_args)
+        self.radio.set_rx_bandwidth(min(self.rate, MAX_RATE * 1e6), self.channel)
+        self.bandwidth = self.radio.get_rx_bandwidth(self.channel)
+        self.set_antenna_port(self.channel, port)
+        self.set_gain(args.gain)
+        self.stream = self.open_stream(self.channel)
         self.metadata = uhd.types.RXMetadata()
         self.command = uhd.types.StreamCMD(uhd.types.StreamMode.num_done)
         self.command.stream_now = True
         self.size = 0
         self.averages = args.averages
         self.set_fft_size(FFT_SIZE)
+
+    def open_stream(self, channel):
+        stream_args = self.uhd.usrp.StreamArgs("fc32", "sc16")
+        stream_args.channels = [channel]
+        return self.radio.get_rx_stream(stream_args)
+
+    def set_antenna_port(self, channel, port):
+        self.radio.set_rx_antenna(port, channel)
+        if self.radio.get_rx_antenna(channel) != port:
+            raise RuntimeError(f"Receiver did not select {port} on UHD channel {channel}")
+
+    def select_antenna(self, antenna, gain):
+        channel, port = self.antennas[antenna]
+        if channel != self.channel:
+            # Release the old streamer before opening the other chain at the
+            # single-channel clock rate. The sweep has already stopped RX.
+            self.stream = None
+            self.radio.set_rx_rate(self.stream_rate, channel)
+            if self.radio.get_rx_bandwidth(channel) != self.bandwidth:
+                self.radio.set_rx_bandwidth(self.bandwidth, channel)
+            self.set_antenna_port(channel, port)
+            self.radio.set_rx_gain(gain, channel)
+            self.stream = self.open_stream(channel)
+            self.check_stream_settings(self.stream_rate, channel)
+            self.channel = channel
+        else:
+            self.set_antenna_port(channel, port)
+
+    def set_gain(self, gain):
+        self.radio.set_rx_gain(gain, self.channel)
+
+    def get_gain(self):
+        return self.radio.get_rx_gain(self.channel)
 
     def set_fft_size(self, size, averages=None):
         averages = self.averages if averages is None else averages
@@ -148,18 +190,22 @@ class Receiver:
         self.command.num_samps = size * averages
         self.samples = np.empty((1, self.command.num_samps), dtype=np.complex64)
 
+    def check_stream_settings(self, rate, channel):
+        if (self.radio.get_rx_rate(channel) != rate or self.radio.get_master_clock_rate() != self.master_clock
+                or self.radio.get_rx_bandwidth(channel) != self.bandwidth):
+            raise RuntimeError(f"Could not set {rate / 1e6:g} MS/s at the current master clock and analog bandwidth")
+
     def set_stream_rate(self, rate):
         if self.stream_rate == rate:
             return
-        self.radio.set_rx_rate(rate, 0)
-        if (self.radio.get_rx_rate(0) != rate or self.radio.get_master_clock_rate() != self.master_clock
-                or self.radio.get_rx_bandwidth(0) != self.bandwidth):
-            raise RuntimeError(f"Could not set {rate / 1e6:g} MS/s at the current master clock and analog bandwidth")
+        self.radio.set_rx_rate(rate, self.channel)
+        self.check_stream_settings(rate, self.channel)
         self.stream_rate = rate
 
     def tune(self, center):
-        self.radio.set_rx_freq(self.uhd.types.TuneRequest(float(center)), 0)
-        return self.radio.get_rx_freq(0)
+        self.radio.set_rx_freq(self.uhd.types.TuneRequest(float(center)), self.channel)
+        actual = self.radio.get_rx_freq(self.channel)
+        return actual
 
     def measure(self, center, offsets):
         actual_center = self.tune(center)
@@ -246,6 +292,10 @@ class Sweep:
         self.navigation_lock = threading.Lock()
         self.navigation_revision = 0
         self.requested_gain = args.gain
+        self.requested_antenna = None if args.demo else args.antenna
+        self.antenna_options = ()
+        self.antenna_error = None
+        self.capture_antenna = None
         self.requested_averages = args.averages
         self.capture_gain = None
         self.capture_averages = None
@@ -269,9 +319,12 @@ class Sweep:
                     if self.args.demo:
                         receiver = Demo(self.args.rate * 1e6)
                     else:
-                        receiver = Receiver(self.args)
+                        antenna = self.capture_antenna or self.args.antenna
+                        receiver = Receiver(self.args, antenna)
+                        self.capture_antenna = antenna
+                        self.antenna_options = tuple(receiver.antennas)
                         applied_request = self.args.gain
-                        self.capture_gain = receiver.radio.get_rx_gain(0)
+                        self.capture_gain = receiver.get_gain()
                         self.capture_rate = receiver.rate
                         self.capture_bandwidth = receiver.bandwidth
                         self.master_clock = receiver.master_clock
@@ -287,14 +340,25 @@ class Sweep:
                                              unified_gain=self.args.gain_table == "unified")
                 rf = receiver.receiver if isinstance(receiver, BandSweep) else receiver
                 gain = self.requested_gain
+                antenna = self.requested_antenna
+                if not self.args.demo and antenna != self.capture_antenna:
+                    try:
+                        receiver.select_antenna(antenna, gain)
+                    except Exception as error:
+                        with self.navigation_lock:
+                            if self.requested_antenna == antenna:
+                                self.requested_antenna = self.capture_antenna
+                                self.antenna_error = f"Could not switch to {antenna}: {error}"
+                        raise
+                    self.capture_antenna = antenna
+                    self.capture_gain = rf.get_gain()
+                    self.recent_peaks = RecentPeaks()
+                    self.shifted_peaks.clear()
                 if not self.args.demo and gain != applied_request:
                     if isinstance(receiver, BandSweep):
                         receiver.control.leave()
-                        radio = receiver.receiver.radio
-                    else:
-                        radio = receiver.radio
-                    radio.set_rx_gain(gain, 0)
-                    self.capture_gain = radio.get_rx_gain(0)
+                    rf.set_gain(gain)
+                    self.capture_gain = rf.get_gain()
                     applied_request = gain
                     self.recent_peaks = RecentPeaks()
                 averages = self.requested_averages
@@ -307,7 +371,8 @@ class Sweep:
                 if focus is None and self.recent_peaks.region is not None:
                     self.recent_peaks = RecentPeaks()
                 plan = None if self.args.demo else continuous_plan(focus, receiver.rate, receiver.bandwidth)
-                image_region = ((focus, self.capture_gain, averages) if plan is None and self.image_reject_available
+                image_region = ((focus, self.capture_antenna, self.capture_gain, averages)
+                                if plan is None and self.image_reject_available
                                 and self.image_reject_requested else None)
                 if image_region != self.image_region:
                     self.image_region = image_region
@@ -324,13 +389,14 @@ class Sweep:
                         slot = len(self.image_references)
                         leg = "ABC"[slot]
                     layout = plans[slot], offsets, usable
-                    self.scan(receiver, focus, paired, layout, leg)
-                    self.cache_detail()
+                    if self.scan(receiver, focus, paired, layout, leg):
+                        self.cache_detail()
                 else:
-                    self.continuous(receiver, focus, plan, gain, averages)
+                    self.continuous(receiver, focus, plan, gain, averages, antenna)
             except Exception as error:
                 self.snapshot = dict(self.snapshot, error=str(error), progress=0)
                 receiver = None
+                rf = None
                 self.recent_peaks = RecentPeaks()
                 self.shifted_peaks.clear()
                 self.image_references.clear()
@@ -345,11 +411,15 @@ class Sweep:
         started = time.perf_counter()
         bins = np.full(detail_count, -np.inf, dtype=np.float32)
         for index, center in enumerate(centers):
+            if self.requested_antenna != self.capture_antenna:
+                return False
             frequency, power = receiver.measure(center, offsets)
             mask = usable & (frequency >= low) & (frequency <= high) & np.isfinite(power)
             indices = ((frequency[mask] - low) * detail_count / (high - low)).astype(int)
             np.maximum.at(bins, np.minimum(indices, detail_count - 1), power[mask])
             self.snapshot = dict(self.snapshot, progress=(index + 1) / len(centers), error=None)
+        if self.requested_antenna != self.capture_antenna:
+            return False
         measured = np.isfinite(bins)
         bins[measured] = 10 * np.log10(np.maximum(1e-16, bins[measured]))
         peaks = None
@@ -369,8 +439,9 @@ class Sweep:
         self.publish(bins, peaks, low, high, first * BINS_PER_OVERVIEW, BINS_PER_OVERVIEW,
                      seconds=round(time.perf_counter() - started, 2), hops=len(centers), focus=focus,
                      image_leg=leg, image_detail=image_detail)
+        return True
 
-    def continuous(self, receiver, focus, plan, gain, averages):
+    def continuous(self, receiver, focus, plan, gain, averages, antenna):
         center, low, high, first, size = plan
         radio = receiver.receiver if isinstance(receiver, BandSweep) else receiver
         full_window = first is None
@@ -419,8 +490,8 @@ class Sweep:
         radio.set_fft_size(fft_size, averages)
         radio.start_continuous()
         try:
-            while (self.focus == focus and self.requested_gain == gain
-                   and self.requested_averages == averages):
+            while (self.focus == focus and self.requested_antenna == antenna
+                   and self.requested_gain == gain and self.requested_averages == averages):
                 if not radio.receive(actual, continuous=True):
                     gaps += 1
                     continue
@@ -450,7 +521,7 @@ class Sweep:
         overview = bins.reshape(-1, group).max(axis=1)
         trace = [round(float(value), 1) if np.isfinite(value) else None for value in overview]
         self.snapshot = dict(self.snapshot, trace=trace, number=self.snapshot["number"] + 1, progress=1, error=None,
-                             gain=getattr(self, "capture_gain", None), capture_focus=focus,
+                             antenna=self.capture_antenna, gain=self.capture_gain, capture_focus=focus,
                              rate_hz=stream_rate if stream_rate is not None else getattr(self, "capture_rate", None),
                              bandwidth_hz=getattr(self, "capture_bandwidth", None),
                              master_clock_hz=getattr(self, "master_clock", None),
@@ -475,7 +546,8 @@ def main():
     parser.add_argument("--gain", type=float, default=35, help="receive gain in dB")
     parser.add_argument("--averages", type=int, default=DEFAULT_AVERAGES,
                         help="FFT blocks averaged per capture (default: %(default)s)")
-    parser.add_argument("--antenna", choices=["RX2", "TX/RX"], default="RX2")
+    parser.add_argument("--antenna", choices=(*RX_PORTS, *RX_ANTENNAS), default="RX2",
+                        help="starting RX antenna; unprefixed ports use RF A")
     parser.add_argument("--fpga-band-sweep", nargs="?", type=Path, const=BUNDLED_RETUNE_IMAGE,
                         help="enable Fast Lock with the bundled image or an explicit image path")
     parser.add_argument("--hop-plan", choices=["uniform", "paired"], default="paired",
@@ -492,6 +564,8 @@ def main():
         parser.error("--gain must be between 0 and 76 dB")
     if not 1 <= args.averages <= MAX_AVERAGES:
         parser.error(f"--averages must be between 1 and {MAX_AVERAGES}")
+    if args.antenna in RX_PORTS:
+        args.antenna = f"A:{args.antenna}"
     if args.fpga_band_sweep:
         if args.demo or args.rate != MAX_RATE or not args.fpga_band_sweep.is_file():
             parser.error("--fpga-band-sweep requires an existing image and live 56 MS/s reception")
@@ -534,6 +608,9 @@ def main():
                 frame["requested_averages"] = None if args.demo else sweep.requested_averages
                 with sweep.navigation_lock:
                     frame["focus"] = sweep.focus
+                    frame["requested_antenna"] = sweep.requested_antenna
+                    frame["antenna_options"] = sweep.antenna_options
+                    frame["antenna_error"] = sweep.antenna_error
                     frame["navigation_revision"] = sweep.navigation_revision
                 frame["peaks"] = bool(snapshot["peak_detail"])
                 frame["image_reject_available"] = sweep.image_reject_available
@@ -579,7 +656,7 @@ def main():
         def do_POST(self):
             if self.handle_bookmarks():
                 return
-            if self.path not in ("/api/focus", "/api/gain", "/api/averages", "/api/image-reject"):
+            if self.path not in ("/api/focus", "/api/antenna", "/api/gain", "/api/averages", "/api/image-reject"):
                 self.send_error(404)
                 return
             try:
@@ -587,6 +664,14 @@ def main():
                 if self.headers.get_content_type() != "application/json" or not 0 < length <= 128:
                     raise ValueError
                 value = json.loads(self.rfile.read(length))
+                if self.path == "/api/antenna":
+                    with sweep.navigation_lock:
+                        if not isinstance(value, str) or value not in sweep.antenna_options:
+                            raise ValueError
+                        sweep.requested_antenna = value
+                        sweep.antenna_error = None
+                    self.reply("application/json", json.dumps(value).encode())
+                    return
                 if self.path == "/api/image-reject":
                     if not sweep.image_reject_available or type(value) is not bool:
                         raise ValueError
@@ -614,6 +699,7 @@ def main():
                     focus = tuple(focus)
             except (ValueError, UnicodeError):
                 messages = {
+                    "/api/antenna": "Expected one of the live receiver's antenna options",
                     "/api/gain": "Expected live RX gain from 0 to 76 dB",
                     "/api/averages": f"Expected an integer from 1 to {MAX_AVERAGES} on a live receiver",
                     "/api/focus": "Expected a frequency range in Hz or null",

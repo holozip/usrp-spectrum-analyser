@@ -1,6 +1,6 @@
 import {useEffect, useRef, useState} from 'react';
 import {BookmarkPanel} from './BookmarkPanel.jsx';
-import {ReceiverControls, useReceiverSetting} from './ReceiverControls.jsx';
+import {antennaLabel, ReceiverControls, useReceiverSetting} from './ReceiverControls.jsx';
 import {SpectrumPanel} from './SpectrumPanel.jsx';
 import {FULL_RANGE, sameRange} from './spectrumData.js';
 import {useFocusRequest} from './useFocusRequest.js';
@@ -32,11 +32,15 @@ function captureDescription(shown) {
   }
   const averages = shown.fft_averages;
   if (averages != null) description += ' · ' + averages + (averages === 1 ? ' average' : ' averages');
+  if (shown.antenna) description += ' · ' + antennaLabel(shown.antenna);
   return description;
 }
 
-function detailStatus({latest, shown, frozen, view}, gain, averages, imageEnabled) {
+function detailStatus({latest, shown, frozen, view}, antenna, gain, averages, imageEnabled) {
   if (!latest) return 'Each trace combines sequential receiver captures.';
+  if (antenna.pendingValue !== null || (latest.requested_antenna && latest.antenna !== latest.requested_antenna)) {
+    return 'Switching RX antenna…';
+  }
   if (gain.pendingValue !== null || (!latest.demo && latest.gain != null
       && latest.gain !== Math.trunc(latest.requested_gain))) return 'Applying RX gain…';
   if (latest.number && !frozen && !sameRange(latest.capture_focus, view)) return 'Updating frequency range…';
@@ -76,6 +80,8 @@ export default function Dashboard() {
       previewRange(receiverFocus ?? null);
     }
   }, [revision, receiverFocus, cancelFocusDelay]);
+  const antenna = useReceiverSetting('antenna', 'requested_antenna', confirmSetting,
+    'Could not change RX antenna. Select an input to retry.');
   const gain = useReceiverSetting('gain', 'requested_gain', confirmSetting,
     'Could not change RX gain. Adjust the slider or press Enter to retry.');
   const averages = useReceiverSetting('averages', 'requested_averages', confirmSetting,
@@ -90,7 +96,7 @@ export default function Dashboard() {
     pending: imageSetting.pendingValue !== null,
     toggle: () => void imageSetting.save(!imageEnabled),
   };
-  const error = latest?.error || focus.error || gain.error || imageSetting.error;
+  const error = latest?.antenna_error || latest?.error || antenna.error || focus.error || gain.error || imageSetting.error;
 
   function commitRange(range, delay) {
     localNavigation.current++;
@@ -143,7 +149,7 @@ export default function Dashboard() {
   return (
     <main>
       <ReceiverControls
-        latest={latest} gain={gain} averages={averages} canReset={view !== null || Boolean(focus.error)}
+        latest={latest} antenna={antenna} gain={gain} averages={averages} canReset={view !== null || Boolean(focus.error)}
         resetRange={() => commitRange(null)}
       />
       <div className={'spectrum-workspace' + (bookmarksOpen ? ' bookmarks-open' : '')}>
@@ -162,7 +168,7 @@ export default function Dashboard() {
         tune={tuneBookmark} selectedIds={selectedBookmarks} showAll={() => setSelectedBookmarks(null)} />}
       </div>
       <footer>
-        <p id="detail">{error || detailStatus(sweep, gain, averages, imageEnabled)}</p>
+        <p id="detail">{error || detailStatus(sweep, antenna, gain, averages, imageEnabled)}</p>
         <span className="visually-hidden" role="status">{error}</span>
         <p>Scroll to zoom · Drag to pan · Shift-drag to select a range</p>
         <p>dBFS axis · Drag to pan · Scroll to scale · Double-click to reset</p>

@@ -12,9 +12,10 @@ p { color: #a7babd; margin: 5px 0 0; }
 #gain-stages span { white-space: nowrap; }
 #gain-stages output { color: #ecf4f3; font-variant-numeric: tabular-nums; }
 .view-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
-#averages-control { white-space: nowrap; }
-#averages { font: inherit; color: inherit; background: #243136; border: 1px solid #53676b;
-  border-radius: 6px; padding: 4px 6px; width: 4ch; }
+#antenna-control, #averages-control { white-space: nowrap; }
+#rx-antenna, #averages { font: inherit; color: inherit; background: #243136; border: 1px solid #53676b;
+  border-radius: 6px; padding: 4px 6px; }
+#averages { width: 4ch; }
 
 button:disabled { opacity: .55; cursor: default; }
 button { font: inherit; color: inherit; background: #243136; border: 1px solid #53676b; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
