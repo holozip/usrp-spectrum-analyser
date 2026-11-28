@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from server import Receiver
+from receiver import Receiver
 
 
 class AntennaTests(unittest.TestCase):

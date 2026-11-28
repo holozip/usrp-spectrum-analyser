@@ -1,6 +1,7 @@
 import {useEffect, useEffectEvent, useRef, useState} from 'react';
 import {BookmarkPanel} from './BookmarkPanel.jsx';
-import {antennaLabel, ReceiverControls, useReceiverSetting} from './ReceiverControls.jsx';
+import {antennaLabel, ReceiverControls} from './ReceiverControls.jsx';
+import {useReceiverSetting} from './useReceiverSetting.js';
 import {SpectrumPanel} from './SpectrumPanel.jsx';
 import {FULL_RANGE, sameRange} from './spectrumData.js';
 import {useFocusRequest} from './useFocusRequest.js';
@@ -8,7 +9,9 @@ import {useSweep} from './useSweep.js';
 import {useBookmarks} from './useBookmarks.js';
 import {observeBookmarkNavigation} from './bookmarkNavigation.js';
 import {newBookmarkDraft} from './bookmarkSelection.js';
-import {bookmarkChannelSetting, ChannelPanel, useChannelReceiver} from './ChannelPanel.jsx';
+import {ChannelPanel} from './ChannelPanel.jsx';
+import {bookmarkChannelSetting} from './channelSettings.js';
+import {useChannelReceiver} from './useChannelReceiver.js';
 
 function connectionStatus(latest, frozen, disconnected) {
   if (disconnected) return 'Disconnected · Retrying';
