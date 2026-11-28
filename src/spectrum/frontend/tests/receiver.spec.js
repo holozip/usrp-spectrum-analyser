@@ -61,6 +61,7 @@ async function mockReceiver(page, overrides = {}) {
         error: state.receiverError, focus: state.focus, capture_focus: state.focus,
         low, high, detail_count: trace.length, peaks, seconds: 0.08, hops: 5,
         gain_table: 'unified', gain: state.gain, requested_gain: state.gain,
+        rx_overload: state.overload,
         antenna_options: state.antennaOptions, requested_antenna: state.antenna,
         antenna: state.captureAntenna ?? state.antenna, antenna_error: state.antennaError,
         fft_averages: state.averages, requested_averages: state.averages,
@@ -77,6 +78,22 @@ async function mockReceiver(page, overrides = {}) {
 
   return {state, writes};
 }
+
+test('RX overload shows live hardware warnings while the trace is frozen', async ({page}) => {
+  const {state} = await mockReceiver(page, {overload: null});
+  await page.goto('/');
+  const status = page.locator('#rx-overload');
+  await expect(status).toHaveText('Overload status unavailable');
+  state.overload = 0;
+  await expect(status).toHaveText('No RX overload detected');
+  await page.getByRole('button', {name: 'Freeze trace'}).click();
+  state.overload = 0x02;
+  await expect(status).toHaveText('RX level warning · ADC');
+  state.overload = 0x15;
+  await expect(status).toHaveText('RX overload · front end, ADC, digital');
+  state.offline = true;
+  await expect(status).toHaveText('Overload status unavailable');
+});
 
 test('the RX antenna selector requests one of four inputs and waits for its capture', async ({page}) => {
   const antennaOptions = ['A:TX/RX', 'A:RX2', 'B:TX/RX', 'B:RX2'];

@@ -113,6 +113,8 @@ def continuous_plan(focus, rate, bandwidth):
 
 
 class Receiver:
+    overload = None
+
     def __init__(self, args, antenna):
         import uhd
 
@@ -171,9 +173,15 @@ class Receiver:
             self.channel = channel
         else:
             self.set_antenna_port(channel, port)
+        if self.overload is not None:
+            self.overload.select(self.radio.get_rx_subdev_name(self.channel))
+            self.overload.rearm()
 
     def set_gain(self, gain):
         self.radio.set_rx_gain(gain, self.channel)
+        if self.overload is not None:
+            self.overload.clear()
+            self.overload.rearm()
 
     def get_gain(self):
         return self.radio.get_rx_gain(self.channel)
@@ -201,10 +209,16 @@ class Receiver:
         self.radio.set_rx_rate(rate, self.channel)
         self.check_stream_settings(rate, self.channel)
         self.stream_rate = rate
+        if self.overload is not None:
+            self.overload.rearm()
 
     def tune(self, center):
+        if self.overload is not None:
+            self.overload.observe(force=True)
         self.radio.set_rx_freq(self.uhd.types.TuneRequest(float(center)), self.channel)
         actual = self.radio.get_rx_freq(self.channel)
+        if self.overload is not None:
+            self.overload.rearm()
         return actual
 
     def measure(self, center, offsets):
@@ -243,6 +257,8 @@ class Receiver:
             if not count or self.metadata.error_code != self.uhd.types.RXMetadataErrorCode.none:
                 raise RuntimeError(f"RX at {center / 1e6:.2f} MHz: {self.metadata.strerror()}")
             received += count
+        if self.overload is not None:
+            self.overload.observe()
         return True
 
     def spectrum(self):
@@ -307,7 +323,8 @@ class Sweep:
         self.recent_details = deque(maxlen=4)
         self.recent_peaks = RecentPeaks()
         self.snapshot = dict(demo=args.demo, fpga=bool(args.fpga_band_sweep), trace=[], number=0, progress=0, error=None,
-                             low=LOW, high=HIGH, seconds=None, detail=b"", peak_detail=b"", image_detail=b"")
+                             low=LOW, high=HIGH, seconds=None, detail=b"", peak_detail=b"", image_detail=b"",
+                             rx_overload=None)
         threading.Thread(target=self.run, daemon=True).start()
 
     def run(self):
@@ -352,6 +369,7 @@ class Sweep:
                         raise
                     self.capture_antenna = antenna
                     self.capture_gain = rf.get_gain()
+                    self.snapshot = dict(self.snapshot, rx_overload=None)
                     self.recent_peaks = RecentPeaks()
                     self.shifted_peaks.clear()
                 if not self.args.demo and gain != applied_request:
@@ -360,6 +378,7 @@ class Sweep:
                     rf.set_gain(gain)
                     self.capture_gain = rf.get_gain()
                     applied_request = gain
+                    self.snapshot = dict(self.snapshot, rx_overload=None)
                     self.recent_peaks = RecentPeaks()
                 averages = self.requested_averages
                 if not self.args.demo:
@@ -394,7 +413,7 @@ class Sweep:
                 else:
                     self.continuous(receiver, focus, plan, gain, averages, antenna)
             except Exception as error:
-                self.snapshot = dict(self.snapshot, error=str(error), progress=0)
+                self.snapshot = dict(self.snapshot, error=str(error), progress=0, rx_overload=None)
                 receiver = None
                 rf = None
                 self.recent_peaks = RecentPeaks()
@@ -407,6 +426,7 @@ class Sweep:
         centers, offsets, usable = layout if layout is not None else captures(receiver.rate, receiver.bandwidth, paired)
         low, high, first, count, centers = scan_range(centers, focus, paired)
         detail_count = count * BINS_PER_OVERVIEW
+        overload = receiver.receiver.overload if isinstance(receiver, BandSweep) else None
         self.snapshot = dict(self.snapshot, progress=0)
         started = time.perf_counter()
         bins = np.full(detail_count, -np.inf, dtype=np.float32)
@@ -417,7 +437,8 @@ class Sweep:
             mask = usable & (frequency >= low) & (frequency <= high) & np.isfinite(power)
             indices = ((frequency[mask] - low) * detail_count / (high - low)).astype(int)
             np.maximum.at(bins, np.minimum(indices, detail_count - 1), power[mask])
-            self.snapshot = dict(self.snapshot, progress=(index + 1) / len(centers), error=None)
+            self.snapshot = dict(self.snapshot, progress=(index + 1) / len(centers), error=None,
+                                 rx_overload=overload.flags if overload is not None else None)
         if self.requested_antenna != self.capture_antenna:
             return False
         measured = np.isfinite(bins)
@@ -438,7 +459,7 @@ class Sweep:
             self.image_references.clear()
         self.publish(bins, peaks, low, high, first * BINS_PER_OVERVIEW, BINS_PER_OVERVIEW,
                      seconds=round(time.perf_counter() - started, 2), hops=len(centers), focus=focus,
-                     image_leg=leg, image_detail=image_detail)
+                     image_leg=leg, image_detail=image_detail, rx_overload=self.snapshot["rx_overload"])
         return True
 
     def continuous(self, receiver, focus, plan, gain, averages, antenna):
@@ -509,7 +530,8 @@ class Sweep:
                 if now >= next_update:
                     self.publish(bins, peaks, low, high, first, group, seconds=CONTINUOUS_UPDATE_SECONDS,
                                  hops=1, continuous=True, windows=windows, gaps=gaps, focus=focus,
-                                 fft_size=fft_size, full_window=full_window, stream_rate=stream_rate)
+                                 fft_size=fft_size, full_window=full_window, stream_rate=stream_rate,
+                                 rx_overload=radio.overload.flags if radio.overload is not None else None)
                     self.cache_detail()
                     next_update = now + CONTINUOUS_UPDATE_SECONDS
         finally:
@@ -517,7 +539,7 @@ class Sweep:
 
     def publish(self, bins, peaks, low, high, first, group, seconds, hops,
                 continuous=False, windows=0, gaps=0, focus=None, fft_size=FFT_SIZE, full_window=False,
-                stream_rate=None, image_leg=None, image_detail=b""):
+                stream_rate=None, image_leg=None, image_detail=b"", rx_overload=None):
         overview = bins.reshape(-1, group).max(axis=1)
         trace = [round(float(value), 1) if np.isfinite(value) else None for value in overview]
         self.snapshot = dict(self.snapshot, trace=trace, number=self.snapshot["number"] + 1, progress=1, error=None,
@@ -531,7 +553,7 @@ class Sweep:
                              peak_detail=peaks.astype("<f4", copy=False).tobytes() if peaks is not None else b"",
                              image_leg=image_leg, image_detail=image_detail,
                              seconds=seconds, hops=hops, continuous=continuous, windows=windows, gaps=gaps,
-                             fft_size=fft_size, full_window=full_window)
+                             fft_size=fft_size, full_window=full_window, rx_overload=rx_overload)
 
     def cache_detail(self):
         frame = self.snapshot

@@ -149,7 +149,7 @@ export default function Dashboard() {
   return (
     <main>
       <ReceiverControls
-        latest={latest} antenna={antenna} gain={gain} averages={averages} canReset={view !== null || Boolean(focus.error)}
+        latest={latest} disconnected={disconnected} antenna={antenna} gain={gain} averages={averages} canReset={view !== null || Boolean(focus.error)}
         resetRange={() => commitRange(null)}
       />
       <div className={'spectrum-workspace' + (bookmarksOpen ? ' bookmarks-open' : '')}>

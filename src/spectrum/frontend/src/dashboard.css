@@ -5,9 +5,14 @@ main { box-sizing: border-box; height: 100vh; height: 100dvh; padding: 8px;
 header, .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
 p { color: #a7babd; margin: 5px 0 0; }
 .capture-tools button[hidden] { display: none; }
+.gain-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 #gain-control { display: flex; align-items: center; gap: 8px; padding: 0 8px; }
 #gain-control input { width: 110px; accent-color: #66dec5; }
 #gain-control output { min-width: 3.4em; font-variant-numeric: tabular-nums; }
+#rx-overload { padding: 2px 7px; margin-left: 4px; border: 1px solid #35454a; border-radius: 5px;
+  color: #a7babd; font-size: .78rem; }
+#rx-overload[data-state="warning"] { color: #f6b76b; border-color: #825a32; background: #37271c; }
+#rx-overload[data-state="overload"] { color: #ffb4ae; border-color: #99524d; background: #3e2223; }
 #gain-stages { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 3px 8px 0; color: #a7babd; font-size: .78rem; }
 #gain-stages span { white-space: nowrap; }
 #gain-stages output { color: #ecf4f3; font-variant-numeric: tabular-nums; }

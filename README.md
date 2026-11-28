@@ -90,6 +90,7 @@ new fields are added.
 
 - The default paired plan uses 208 hops at 56 MS/s. Use `--hop-plan uniform` to select the 311-hop plan. [Measured performance](docs/firmware-build.md#measured-performance)
 - `--gain DB` sets the starting RX gain (default 35 dB). Use the **RX gain** slider to adjust it while receiving. In unified mode, the readout shows the selected row’s analog stage indices and nominal gains at 2.3 GHz as you move the slider. With the ordinary UHD sweep, try `--rate 40` or `--rate 20` if USB reception is unstable. FPGA sweeping and continuous capture require the default `--rate 56` setting.
+- With `--fpga-band-sweep`, the status beside **RX gain** reads the active AD9361 chain’s detectors during both sweeps and continuous capture. It shows a level warning for the small ADC or front-end thresholds, and an overload for the large thresholds or digital saturation. Peak flags can stay set until the gain changes or the detectors reset. A warning during a sweep applies to the receiver across its hops.
 - `--gain-table stock` uses UHD’s band-specific tables and is the default. `--gain-table unified` uses UHD’s existing 1.3–4 GHz table across the sweep. It requires the [FPGA sweep image](#unified-gain-table) and works with stock UHD.
 - `--device ARGS` overrides the UHD device arguments. The default receive queue uses `num_recv_frames=128`. To use a deeper queue, pass `--device type=b200,product=B210,num_recv_frames=512`.
 

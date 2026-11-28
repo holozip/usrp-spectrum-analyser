@@ -4,6 +4,8 @@ import time
 
 
 B210_RX_BAND_EDGES = (1.3e9, 2.2e9, 4e9)
+OVERLOAD_POLL_SECONDS = 0.1
+OVERLOAD_HOLD_SECONDS = 1.0
 
 
 class FastLock:
@@ -107,6 +109,66 @@ class FastLock:
         self.transact(0x1000000 | slot)
 
 
+class RxOverload:
+    """Read the AD9361 peak and saturation flags through the retune mailbox."""
+
+    def __init__(self, control, frontend):
+        self.control = control
+        self.select(frontend)
+
+    def select(self, frontend):
+        # UHD names the chip frontend. On a B210, RF A uses RX2 and RF B uses RX1.
+        self.chain = {"FE-RX1": 0, "FE-RX2": 1}.get(frontend)
+        self.armed = False
+        self.clear()
+
+    def clear(self):
+        self.flags = None
+        self.hold_until = self.next_poll = 0
+
+    def rearm(self):
+        if self.chain is None:
+            return
+        self.armed = False
+        # ALERT to RX can set false peak flags in manual gain mode. Pulse only
+        # this chain's reset bit and restore the existing small LMT threshold.
+        try:
+            threshold = self.control.read(0x107)
+        except RuntimeError:
+            self.clear()
+            return
+        try:
+            self.control.write(0x107, threshold | (1 << (6 + self.chain)))
+        finally:
+            self.control.write(0x107, threshold)
+        self.armed = True
+        self.next_poll = 0
+
+    def observe(self, force=False):
+        if self.chain is None or (force and not self.next_poll):
+            return
+        now = time.monotonic()
+        if not force and now < self.next_poll:
+            return
+        self.next_poll = now + OVERLOAD_POLL_SECONDS
+        if not self.armed:
+            if not force:
+                self.rearm()
+                self.next_poll = now + OVERLOAD_POLL_SECONDS
+            return
+        try:
+            flags = self.control.read(0x2B8 + self.chain) & 0x1F
+        except RuntimeError:
+            self.flags = None
+            self.hold_until = 0
+            return
+        if flags:
+            self.flags = flags
+            self.hold_until = now + OVERLOAD_HOLD_SECONDS
+        elif now >= self.hold_until:
+            self.flags = 0
+
+
 class BandSweep:
     def __init__(self, receiver, centers, unified_gain=False):
         self.receiver = receiver
@@ -131,6 +193,7 @@ class BandSweep:
         self.after_continuous = False
         self.previous_alc = None
         self.slot = 0
+        receiver.overload = RxOverload(self.control, receiver.radio.get_rx_subdev_name(receiver.channel))
 
     def tune(self, center):
         return self.receiver.tune(center)

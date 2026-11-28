@@ -128,6 +128,15 @@ API's structured JSON errors. Gain, averages and antenna expose requested
 versus captured values. On an antenna switch, wait for `antenna` to match
 `requested_antenna` in `/api/sweep`. `antenna_error` reports a failed hardware switch.
 
+`rx_overload` in `/api/sweep` reports the active AD9361 receive chain's detector
+flags with `--fpga-band-sweep`. `null` means unavailable or awaiting a reading,
+and `0` means no detector flag was seen. The integer uses bit 4 for large
+front-end (LMT) overload, bit 3 for small LMT overload, bit 2 for large ADC
+overload, bit 1 for small ADC overload, and bit 0 for digital saturation. Peak
+flags can latch until a gain change or detector reset. The server holds the
+last flagged reading for one second across retunes so brief events remain
+visible. This status follows live capture and has no per-bin attribution.
+
 The generic `/api/focus` endpoint does not force another browser's local
 view to navigate; use bookmark recall for synchronised bookmark navigation.
 Freeze, trace selection, panel layout and colour ranges remain browser-local;

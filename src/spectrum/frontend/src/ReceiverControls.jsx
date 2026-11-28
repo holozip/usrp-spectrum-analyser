@@ -69,7 +69,28 @@ function GainStageReadout({gain, table}) {
 
 const GAIN_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', 'Enter'];
 
-function GainControl({requested, table, setting}) {
+function OverloadStatus({flags, fpga}) {
+  let state = 'unavailable';
+  let label = 'Overload status unavailable';
+  let title = fpga ? 'Waiting for a valid AD9361 detector reading.' : 'Requires a compatible FPGA sweep image.';
+  if (flags != null) {
+    title = 'AD9361 detector status for the active RX chain. Peak flags can latch until gain changes or the detectors reset.';
+    state = 'clear';
+    label = 'No RX overload detected';
+    if (flags !== 0) {
+      const stages = [];
+      if (flags & 0x18) stages.push('front end');
+      if (flags & 0x06) stages.push('ADC');
+      if (flags & 0x01) stages.push('digital');
+      const severe = Boolean(flags & 0x15);
+      state = severe ? 'overload' : 'warning';
+      label = `${severe ? 'RX overload' : 'RX level warning'} · ${stages.join(', ')}`;
+    }
+  }
+  return <span id="rx-overload" role="status" data-state={state} title={title}>{label}</span>;
+}
+
+function GainControl({requested, table, setting, overload, fpga}) {
   const [draft, setDraft] = useState(null);
   const value = draft ?? requested;
 
@@ -83,18 +104,21 @@ function GainControl({requested, table, setting}) {
 
   return (
     <>
-      <label id="gain-control">
-        RX gain
-        <input
-          id="gain" type="range" min="0" max="76" step="1" value={value}
-          disabled={setting.pendingValue !== null}
-          aria-describedby={setting.error ? 'detail' : undefined}
-          onChange={event => setDraft(event.currentTarget.valueAsNumber)}
-          onPointerUp={commit} onBlur={commit}
-          onKeyUp={event => { if (GAIN_KEYS.includes(event.key)) void commit(); }}
-        />
-        <output id="gain-value" htmlFor="gain" aria-live="off">{value} dB</output>
-      </label>
+      <div className="gain-row">
+        <label id="gain-control">
+          RX gain
+          <input
+            id="gain" type="range" min="0" max="76" step="1" value={value}
+            disabled={setting.pendingValue !== null}
+            aria-describedby={setting.error ? 'detail' : undefined}
+            onChange={event => setDraft(event.currentTarget.valueAsNumber)}
+            onPointerUp={commit} onBlur={commit}
+            onKeyUp={event => { if (GAIN_KEYS.includes(event.key)) void commit(); }}
+          />
+          <output id="gain-value" htmlFor="gain" aria-live="off">{value} dB</output>
+        </label>
+        <OverloadStatus flags={overload} fpga={fpga} />
+      </div>
       <GainStageReadout table={table} gain={value} />
     </>
   );
@@ -142,13 +166,14 @@ export function antennaLabel(value) {
   return `RF ${chain} · ${port}`;
 }
 
-export function ReceiverControls({latest, antenna, gain, averages, canReset, resetRange}) {
+export function ReceiverControls({latest, disconnected, antenna, gain, averages, canReset, resetRange}) {
   return (
     <div className="receiver-controls">
       <header>
         <div>
           {latest?.requested_gain != null && (
-            <GainControl requested={latest.requested_gain} table={latest.gain_table} setting={gain} />
+            <GainControl requested={latest.requested_gain} table={latest.gain_table} setting={gain}
+              overload={disconnected || latest.error ? null : latest.rx_overload} fpga={latest.fpga} />
           )}
         </div>
         <div className="view-controls">
