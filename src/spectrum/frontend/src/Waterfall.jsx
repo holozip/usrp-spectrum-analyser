@@ -6,8 +6,10 @@ import {createWaterfallCanvas} from './waterfallCanvas.js';
 const MIN_COLOR = -160;
 const MAX_COLOR = 0;
 const COLOR_SPAN = MAX_COLOR - MIN_COLOR;
+const AUTO_HEADROOM = 3;
+const MIN_AUTO_SPAN = 12;
 
-function ColorRange({limits, setLimits}) {
+function ColorRange({limits, setLimits, autoRange, canAutoRange}) {
   const track = useRef(null);
   const lowerInput = useRef(null);
   const upperInput = useRef(null);
@@ -53,6 +55,8 @@ function ColorRange({limits, setLimits}) {
         />
       </div>
       <span><output id="waterfall-high-value" htmlFor="waterfall-high" aria-live="off">{label(high)}</output> dBFS</span>
+      <button type="button" onClick={autoRange} disabled={!canAutoRange}
+        title="Set color limits from the noise floor and strongest peak">Auto range</button>
     </div>
   );
 }
@@ -62,10 +66,11 @@ export function Waterfall({shown, data, view, frozen, gestures}) {
   const rows = useRef(null);
   const renderer = useRef(null);
   const [limits, setLimits] = useState([-115, -35]);
+  const [canAutoRange, setCanAutoRange] = useState(false);
   const [low, high] = limits;
 
   useLayoutEffect(() => {
-    const drawing = createWaterfallCanvas(canvas.current, rows.current);
+    const drawing = createWaterfallCanvas(canvas.current, rows.current, setCanAutoRange);
     renderer.current = drawing;
     drawing.resize();
     const observer = new ResizeObserver(drawing.resize);
@@ -86,13 +91,22 @@ export function Waterfall({shown, data, view, frozen, gestures}) {
     renderer.current.addCapture(shown, data, view, frozen);
   }, [shown, data, view, frozen]);
 
+  function autoRange() {
+    const signal = renderer.current.signalLevels();
+    if (!signal) return;
+    const {noiseFloor, peak} = signal;
+    const bottom = clamp(Math.floor(noiseFloor - AUTO_HEADROOM), MIN_COLOR, MAX_COLOR - MIN_AUTO_SPAN);
+    const top = clamp(Math.ceil(peak + AUTO_HEADROOM), bottom + MIN_AUTO_SPAN, MAX_COLOR);
+    setLimits([bottom, top]);
+  }
+
   useChartWheel(canvas, event => gestures.wheel(event, false));
 
   return (
     <div id="waterfall-panel">
       <div id="waterfall-label">
         <span>Waterfall · newest at top</span>
-        <ColorRange limits={limits} setLimits={setLimits} />
+        <ColorRange limits={limits} setLimits={setLimits} autoRange={autoRange} canAutoRange={canAutoRange} />
       </div>
       <div id="waterfall-rows" ref={rows}>
         <canvas

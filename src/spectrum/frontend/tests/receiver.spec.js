@@ -37,7 +37,7 @@ async function mockReceiver(page, overrides = {}) {
       const imageSet = imageLeg === 'C';
       const [low, high] = state.focus ?? [70e6, 6e9];
       const power = {A: -70, B: -60, C: -50}[imageLeg] ?? -65;
-      const trace = state.ready ? Array(32).fill(power) : [];
+      const trace = state.ready ? (state.trace ?? Array(32).fill(power)) : [];
       if (state.ready) {
         number++;
         const powers = [power];
@@ -50,7 +50,9 @@ async function mockReceiver(page, overrides = {}) {
         }
         const packet = Buffer.alloc(powers.length * trace.length * 4);
         for (const [index, level] of powers.entries()) {
-          for (let bin = 0; bin < trace.length; bin++) packet.writeFloatLE(level, (index * trace.length + bin) * 4);
+          for (let bin = 0; bin < trace.length; bin++) {
+            packet.writeFloatLE(index === 0 ? trace[bin] ?? -Infinity : level, (index * trace.length + bin) * 4);
+          }
         }
         packets.set(number, packet);
       }
@@ -118,6 +120,32 @@ test('live gain previews unified stages and FFT averages preserve invalid or fai
   await page.mouse.up();
   await expect.poll(() => state.gain).toBeGreaterThan(36);
   expect(writes).toHaveLength(4);
+});
+
+test('waterfall auto range fits both sliders to the displayed floor and peak', async ({page}) => {
+  const {state, writes} = await mockReceiver(page, {ready: false});
+  await page.goto('/');
+  const autoRange = page.getByRole('button', {name: 'Auto range'});
+  await expect(autoRange).toBeDisabled();
+
+  state.trace = [null, -149, ...Array(8).fill(-99), ...Array(21).fill(-60), -24];
+  state.ready = true;
+  await expect(autoRange).toBeEnabled();
+  const freeze = page.getByRole('button', {name: 'Freeze trace'});
+  await freeze.click();
+  const waterfall = page.locator('#waterfall');
+  const before = await waterfall.evaluate(canvas => canvas.toDataURL());
+
+  await autoRange.press('Enter');
+  const lower = page.getByRole('slider', {name: 'Waterfall lower level'});
+  const upper = page.getByRole('slider', {name: 'Waterfall upper level'});
+  await expect(lower).toHaveValue('-102');
+  await expect(upper).toHaveValue('-21');
+  expect(await waterfall.evaluate(canvas => canvas.toDataURL())).not.toBe(before);
+
+  await lower.press('ArrowRight');
+  await expect(lower).toHaveValue('-101');
+  expect(writes).toEqual([]);
 });
 
 test('image rejection waits for a complete set, switches sources, and yields to continuous capture', async ({page}) => {

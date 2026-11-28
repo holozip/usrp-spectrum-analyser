@@ -14,7 +14,7 @@ function createPalette() {
 }
 
 /** Owns the waterfall canvas pixels and a ring of uncolored, per-column dBFS values. */
-export function createWaterfallCanvas(canvas, container) {
+export function createWaterfallCanvas(canvas, container, onSignalAvailability) {
   const context = canvas.getContext('2d');
   const width = canvas.width;
   const palette = createPalette();
@@ -27,6 +27,7 @@ export function createWaterfallCanvas(canvas, container) {
   let lastFrame;
   let colorLow;
   let colorHigh;
+  let hasSignal = false;
 
   function colorRow(powers, rgba, offset = 0) {
     const span = colorHigh - colorLow;
@@ -80,6 +81,20 @@ export function createWaterfallCanvas(canvas, container) {
     repaint();
   }
 
+  function updateSignalAvailability(available) {
+    if (available === hasSignal) return;
+    hasSignal = available;
+    onSignalAvailability(available);
+  }
+
+  function signalLevels() {
+    if (!hasSignal) return null;
+    const sorted = history[head].filter(Number.isFinite).sort();
+    const last = sorted.length - 1;
+    // Use the lower quartile to estimate the floor even with many occupied frequencies.
+    return {noiseFloor: sorted[Math.floor(last / 4)], peak: sorted[last]};
+  }
+
   function addCapture(frame, data, view, frozen) {
     if (!frame?.number) return;
     const {low, high, dataLow, dataHigh, leg, values} = data;
@@ -91,7 +106,10 @@ export function createWaterfallCanvas(canvas, container) {
       captureKey = key;
       lastFrame = undefined;
     }
-    if (!values.length || frozen || !sameRange(frame.capture_focus, view) || lastFrame === frame.number) return;
+    if (!values.length || frozen || !sameRange(frame.capture_focus, view) || lastFrame === frame.number) {
+      if (!count) updateSignalAvailability(false);
+      return;
+    }
 
     const binsPerHz = values.length / (dataHigh - dataLow);
     const hzPerPixel = (high - low) / width;
@@ -117,7 +135,8 @@ export function createWaterfallCanvas(canvas, container) {
     }
     context.putImageData(newestRow, 0, 0);
     lastFrame = frame.number;
+    updateSignalAvailability(powers.some(Number.isFinite));
   }
 
-  return {resize, setLimits, addCapture};
+  return {resize, setLimits, addCapture, signalLevels};
 }
