@@ -1,4 +1,4 @@
-import {Fragment, useEffect, useId, useRef, useState} from 'react';
+import {useEffect, useId, useRef, useState} from 'react';
 import {frequencyLabel, FULL_RANGE} from './spectrumData.js';
 import {MAX_BOOKMARK_BANDWIDTH} from './bookmarkSelection.js';
 import {SidebarPanel} from './SidebarPanel.jsx';
@@ -76,29 +76,39 @@ export function BookmarkPanel({store, close, actions, listen, selectedIds, showA
     {selectedIds && <div className="bookmark-selection"><p>Selected plot group</p><button type="button" onClick={showAll}>Show all bookmarks</button></div>}
     {!store.loaded && !store.error && <p role="status">Loading bookmarks…</p>}
     {store.loaded && !bookmarks.length && <p>{selectedIds ? 'No bookmarks remain in this group.' : 'No bookmarks yet. Add the current view centre, or enter a frequency.'}</p>}
-    <div className="bookmark-table-scroll" role="region" aria-label="Bookmark table" tabIndex={0}>
-    <table className="bookmark-table"><caption className="visually-hidden">Saved signal bookmarks</caption>
-      <thead><tr>{['Title', 'Frequency', 'Bandwidth', 'Modulation', 'Tag', 'Actions'].map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
-      <tbody>{bookmarks.map(bookmark => <Fragment key={bookmark.id}><tr>
-      <th scope="row">{bookmark.title}</th>
-      <td className="bookmark-frequency">{frequencyLabel(bookmark.frequency_hz, true)}</td>
-      <td>{bookmark.bandwidth_hz == null ? 'Unknown' : (bookmark.bandwidth_hz / 1000).toLocaleString(undefined, {maximumFractionDigits: 3}) + ' kHz'}</td>
-      <td>{bookmark.modulation || 'Unknown'}</td><td>{bookmark.tag || '—'}</td>
-      <td><div className="bookmark-actions">
-        <button type="button" disabled={tuneDisabled}
-          aria-label={`Tune to ${frequencyLabel(bookmark.frequency_hz, true)}, ${bookmark.title}`}
-          onClick={() => void actions.tune(bookmark)}>Tune</button>
-        {listen && <button type="button" disabled={tuneDisabled}
-          aria-label={'Listen to ' + bookmark.title} onClick={() => listen(bookmark)}>Listen</button>}
-        <button type="button" disabled={busy || draft?.saving} onClick={() => edit(bookmark)} aria-label={'Edit ' + bookmark.title}>Edit</button>
-        <button type="button" disabled={busy || draft?.saving} onClick={() => setConfirmDelete(bookmark.id)} aria-label={'Delete ' + bookmark.title}>Delete</button>
-      </div></td></tr>
-      {bookmark.notes && <tr className="bookmark-notes-row"><td colSpan={6}><p className="bookmark-notes">{bookmark.notes}</p></td></tr>}
-      {confirmDelete === bookmark.id && <tr><td colSpan={6}><div className="bookmark-delete" role="group" aria-label={'Confirm deletion of ' + bookmark.title}>
-        <p>Delete “{bookmark.title}”? This cannot be undone.</p>
-        <button type="button" disabled={busy} onClick={() => void removeBookmark(bookmark)}>Confirm delete</button>
-        <button type="button" disabled={busy} onClick={() => setConfirmDelete(null)}>Keep bookmark</button>
-      </div></td></tr>}
-    </Fragment>)}</tbody></table></div>
+    {bookmarks.length > 0 && <ul className="bookmark-list" role="list" aria-label="Saved signal bookmarks">
+      {bookmarks.map(bookmark => {
+        const frequency = frequencyLabel(bookmark.frequency_hz, true);
+        const bandwidth = bookmark.bandwidth_hz == null ? 'Unknown'
+          : (bookmark.bandwidth_hz / 1000).toLocaleString(undefined, {maximumFractionDigits: 3}) + ' kHz';
+        return <li key={bookmark.id} className="bookmark-item">
+          <div className="bookmark-item-heading">
+            <h3>{bookmark.title}</h3>
+            <span className="bookmark-frequency">{frequency}</span>
+          </div>
+          <dl className="bookmark-details">
+            <div><dt>Bandwidth</dt><dd>{bandwidth}</dd></div>
+            <div><dt>Modulation</dt><dd>{bookmark.modulation || 'Unknown'}</dd></div>
+            <div><dt>Tag</dt><dd>{bookmark.tag || '—'}</dd></div>
+          </dl>
+          <div className="bookmark-actions">
+            <button type="button" disabled={tuneDisabled} aria-label={`Tune to ${frequency}, ${bookmark.title}`}
+              onClick={() => void actions.tune(bookmark)}>Tune</button>
+            {listen && <button type="button" disabled={tuneDisabled}
+              aria-label={'Listen to ' + bookmark.title} onClick={() => listen(bookmark)}>Listen</button>}
+            <button type="button" disabled={busy || draft?.saving} onClick={() => edit(bookmark)} aria-label={'Edit ' + bookmark.title}>Edit</button>
+            <button type="button" disabled={busy || draft?.saving} onClick={() => setConfirmDelete(bookmark.id)} aria-label={'Delete ' + bookmark.title}>Delete</button>
+          </div>
+          {confirmDelete === bookmark.id && <div className="bookmark-delete" role="group" aria-label={'Confirm deletion of ' + bookmark.title}>
+            <p>Delete “{bookmark.title}”? This cannot be undone.</p>
+            <div className="bookmark-actions">
+              <button type="button" disabled={busy} onClick={() => void removeBookmark(bookmark)}>Confirm delete</button>
+              <button type="button" disabled={busy} onClick={() => setConfirmDelete(null)}>Keep bookmark</button>
+            </div>
+          </div>}
+          {bookmark.notes && <p className="bookmark-notes">{bookmark.notes}</p>}
+        </li>;
+      })}
+    </ul>}
   </SidebarPanel>;
 }

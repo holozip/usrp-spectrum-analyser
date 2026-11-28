@@ -142,7 +142,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .dashboard-error button { margin-top: 12px; }
 
 .spectrum-workspace { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; gap: 8px; }
-.spectrum-workspace.bookmarks-open { grid-template-columns: minmax(0, 1fr) minmax(420px, 620px); }
+.spectrum-workspace.bookmarks-open { grid-template-columns: minmax(0, 1fr) clamp(340px, 33vw, 460px); }
 .spectrum-workspace.channel-open:not(.bookmarks-open) { grid-template-columns: minmax(0, 1fr) minmax(260px, 310px); }
 .receiver-sidebar { display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; }
 .receiver-sidebar > #channel-panel { flex: 0 1 auto; }
@@ -154,20 +154,19 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .sidebar-panel button { padding: 6px 10px; font-size: .85rem; }
 .sidebar-panel p { font-size: .85rem; overflow-wrap: anywhere; }
 .bookmark-add { margin: 12px 0; }
-.bookmark-table-scroll { max-width: 100%; overflow-x: auto; margin-top: 12px; overscroll-behavior-x: contain; }
-.bookmark-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: .8rem; }
-.bookmark-table th, .bookmark-table td { padding: 8px 6px; text-align: left; vertical-align: top; border-top: 1px solid #35454a; }
-.bookmark-table th[scope="row"] { min-width: 95px; max-width: 180px; overflow-wrap: anywhere; }
-.bookmark-table td { min-width: 65px; max-width: 180px; overflow-wrap: anywhere; }
-.bookmark-table thead { color: #a7babd; }
-.bookmark-table .bookmark-actions { margin: 0; flex-wrap: nowrap; }
-.bookmark-table .bookmark-actions button { flex-shrink: 0; white-space: nowrap; }
-.bookmark-notes-row td { border-top: 0; padding-top: 0; }
-.bookmark-frequency { color: #79e4ce; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.bookmark-notes { white-space: pre-wrap; }
+.bookmark-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.bookmark-item { min-width: 0; padding: 10px; border: 1px solid #35454a; border-radius: 8px;
+  background: #141b1e; overflow-wrap: anywhere; }
+.bookmark-item-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; }
+.bookmark-item-heading h3 { flex: 1 1 11rem; min-width: 0; margin: 0; font-size: .95rem; }
+.bookmark-frequency { color: #79e4ce; font-size: .85rem; font-variant-numeric: tabular-nums; }
+.bookmark-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 84px), 1fr));
+  gap: 6px 10px; margin: 8px 0 0; font-size: .8rem; }
+.bookmark-details dt { color: #a7babd; font-size: .72rem; }
+.bookmark-details dd { margin: 2px 0 0; }
+.bookmark-item .bookmark-notes { margin-top: 8px; white-space: pre-wrap; }
 .bookmark-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .bookmark-delete { padding: 10px; margin-top: 8px; border-radius: 8px; background: #3b2b23; }
-.bookmark-delete button { margin: 6px 4px 0 0; }
 .bookmark-form { padding: 12px; background: #243136; border-radius: 8px; }
 .bookmark-form h3 { margin: 0 0 10px; font-size: 1rem; }
 .bookmark-form label { display: grid; gap: 4px; margin: 10px 0; font-size: .85rem; }
@@ -201,9 +200,9 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .bookmark-band-low span { text-align: left; }
 .bookmark-band-high span { text-align: right; }
 @media (max-width: 1100px) {
-  .spectrum-workspace.bookmarks-open { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(320px, 1fr) minmax(220px, .8fr); }
-  main:has(.bookmarks-open) { height: auto; min-height: 100dvh; grid-template-rows: auto minmax(640px, 1fr) auto; }
-  #bookmarks-panel { max-height: 440px; }
+  .spectrum-workspace.bookmarks-open { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(360px, 1fr) auto; }
+  main:has(.bookmarks-open) { height: auto; min-height: 100dvh; grid-template-rows: auto 1fr auto; }
+  .receiver-sidebar > #bookmarks-panel { flex: 0 0 auto; overflow: visible; }
 }
 
 @media (max-width: 760px) {

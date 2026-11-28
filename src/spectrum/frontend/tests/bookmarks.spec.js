@@ -79,7 +79,7 @@ test('bookmark CRUD persists across reload, failures preserve edits, deletion is
   await expect(panel.getByRole('alert')).toContainText('Your changes are kept');
   await expect(panel.getByLabel('Title', {exact: true})).toHaveValue('Local FM');
   await panel.getByRole('button', {name: 'Save bookmark'}).click();
-   await expect(panel.getByRole('rowheader', {name: 'Local FM', exact: true})).toBeVisible();
+  await expect(panel.getByRole('heading', {name: 'Local FM', exact: true})).toBeVisible();
   await expect(panel.getByText('Test <script>alert(1)</script>', {exact: true})).toBeVisible();
   expect(state.bookmarks[0].frequency_hz).toBe(101e6);
   await page.reload();
@@ -129,7 +129,7 @@ test('external bookmarks appear while open; flags follow visibility and crowded 
   await expect(page.locator('.bookmark-flag')).toHaveCount(1);
   state.bookmarks = Array.from({length: 30}, (_, index) => makeBookmark(String(index), 'Cluster ' + index));
   state.bookmarks.push(makeBookmark('outside', 'Offscreen station', 200e6));
-   await expect(page.getByRole('rowheader', {name: 'Cluster 29', exact: true})).toBeAttached();
+  await expect(page.getByRole('heading', {name: 'Cluster 29', exact: true})).toBeAttached();
   const flags = page.locator('.bookmark-flag');
   await expect(flags.first()).toContainText('bookmarks');
   const boxes = await flags.evaluateAll(elements => elements.map(element => {
@@ -143,7 +143,7 @@ test('external bookmarks appear while open; flags follow visibility and crowded 
   }
   await flags.first().click();
   await expect(page.getByText('Selected plot group', {exact: true})).toBeVisible();
-   await expect(page.getByRole('rowheader', {name: 'Offscreen station', exact: true})).toHaveCount(0);
+  await expect(page.getByRole('heading', {name: 'Offscreen station', exact: true})).toHaveCount(0);
   expect(writes).toEqual([]);
   await page.getByRole('button', {name: 'Close bookmarks'}).click();
   await expect(page.locator('.bookmark-flags')).toHaveCount(0);
@@ -205,7 +205,7 @@ test('bookmark load failure offers retry and recovers without reload', async ({p
   await expect(panel.getByRole('alert')).toContainText('Could not load bookmarks: Bookmark storage offline');
   state.failLoad = false;
   await panel.getByRole('button', {name: 'Retry loading', exact: true}).click();
-   await expect(panel.getByRole('rowheader', {name: 'Recovered station', exact: true})).toBeVisible();
+  await expect(panel.getByRole('heading', {name: 'Recovered station', exact: true})).toBeVisible();
   await expect(panel.getByRole('alert')).toHaveCount(0);
   expect(writes).toEqual([]);
 });
@@ -233,7 +233,7 @@ test('plot flag recall failures are actionable and the saved bookmark can be tun
   await panel.getByRole('button', {name: 'Confirm delete', exact: true}).click();
   await expect(panel.getByRole('alert')).toContainText('Could not delete bookmark: Storage unavailable. Try again.');
   expect(state.bookmarks).toHaveLength(1);
-  await expect(panel.getByRole('rowheader', {name: 'Local station', exact: true})).toBeVisible();
+  await expect(panel.getByRole('heading', {name: 'Local station', exact: true})).toBeVisible();
   await panel.getByRole('button', {name: 'Confirm delete', exact: true}).click();
   await expect(panel.getByText('No bookmarks yet.', {exact: false})).toBeVisible();
   expect(writes.filter(write => write.path === '/api/focus')).toEqual([]);
@@ -274,8 +274,8 @@ test('frozen spectrum selection, independent handles and numeric fields share on
   expect(writes).toEqual([]);
   await panel.getByRole('button', {name: 'Save bookmark', exact: true}).click();
   await expect(selection).toHaveCount(0);
-  await expect(panel.getByRole('table')).toContainText('200 kHz');
-  await expect(panel.getByRole('table')).toContainText('Local');
+  await expect(panel.getByRole('list', {name: 'Saved signal bookmarks'})).toContainText('200 kHz');
+  await expect(panel.getByRole('list', {name: 'Saved signal bookmarks'})).toContainText('Local');
   expect(state.bookmarks[0]).toMatchObject({frequency_hz: 101e6, bandwidth_hz: 200e3, tag: 'Local', notes: 'Keep this draft while moving handles'});
   expect(writes).toHaveLength(1);
   await panel.getByRole('button', {name: 'Tune to 101.0000 MHz, Picked signal', exact: true}).click();
@@ -317,13 +317,13 @@ test('click selection and keyboard handles do not navigate; Escape restores norm
   await expect.poll(() => writes.filter(write => write.path === '/api/focus').length).toBe(1);
 });
 
-test('manual add and editing preserve unknown bandwidth; cancellation clears the overlay and mobile table owns overflow', async ({page}) => {
+test('manual add and editing preserve unknown bandwidth; cancellation clears the overlay on mobile', async ({page}) => {
   const {writes} = await mockBookmarks(page, [{...makeBookmark('station', 'Saved signal'), bandwidth_hz: 250e3, tag: 'Broadcast'}]);
   await page.setViewportSize({width: 390, height: 844});
   await page.goto('/');
   await page.getByRole('button', {name: 'Bookmarks', exact: true}).click();
   const panel = page.getByRole('complementary', {name: 'Spectrum bookmarks'});
-  await expect(panel.getByRole('table')).toContainText('Broadcast');
+  await expect(panel.getByRole('list', {name: 'Saved signal bookmarks'})).toContainText('Broadcast');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await panel.getByRole('button', {name: 'Edit Saved signal', exact: true}).click();
   await expect(page.locator('.bookmark-pick-surface')).toHaveCount(1);

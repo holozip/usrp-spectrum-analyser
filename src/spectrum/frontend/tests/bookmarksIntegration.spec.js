@@ -48,7 +48,7 @@ test('HTTP-created bookmarks share UI edits, persistence, recall and deletion', 
     await expect(page.locator('#plot')).toHaveAttribute('aria-label', /100.0000 MHz to 102.0000 MHz/);
     await page.getByRole('button', {name: 'Bookmarks', exact: true}).click();
     const panel = page.getByRole('complementary', {name: 'Spectrum bookmarks'});
-     await expect(panel.getByRole('rowheader', {name: bookmark.title, exact: true})).toBeVisible();
+    await expect(panel.getByRole('heading', {name: bookmark.title, exact: true})).toBeVisible();
      await panel.getByRole('button', {name: 'Edit ' + bookmark.title, exact: true}).click();
      await expect(panel.getByLabel('Bandwidth (kHz)')).toHaveValue('150');
      await expect(panel.getByLabel('Tag', {exact: true})).toHaveValue('Demo');
@@ -91,39 +91,60 @@ test('HTTP-created bookmarks share UI edits, persistence, recall and deletion', 
     await page.getByRole('button', {name: 'Bookmarks', exact: true}).click();
     expect((await request.delete(path)).status()).toBe(200);
     ownedIds.delete(bookmark.id);
-     await expect(panel.getByRole('rowheader', {name: bookmark.title, exact: true})).toHaveCount(0);
+    await expect(panel.getByRole('heading', {name: bookmark.title, exact: true})).toHaveCount(0);
 });
 
-test('desktop and phone bookmark flags remain readable on the real demo', async ({page, request}) => {
+test('bookmark controls and plot flags fit on desktop and phone', async ({page, request}) => {
   await request.post('/api/focus', {data: [100e6, 102e6]});
-  for (const [title, frequency] of [['Demo FM candidate', 101e6], ['Nearby demo signal', 101.05e6], ['Demo beacon', 101.1e6]]) {
+  const longTitle = 'Signal'.repeat(20);
+  for (const [title, frequency] of [['Demo FM candidate', 101e6], [longTitle, 101.05e6], ['Demo beacon', 101.1e6]]) {
     const response = await request.post('/api/bookmarks', {data: {
-      frequency_hz: frequency, bandwidth_hz: 100e3, tag: 'Demo', title, modulation: 'Unknown', notes: 'Simulated data — UI demonstration only',
+      frequency_hz: frequency, bandwidth_hz: 100e3, tag: title === longTitle ? 'Demo'.repeat(16) : 'Demo',
+      title, modulation: 'Unknown', notes: 'Simulated data — UI demonstration only',
     }});
     expect(response.status()).toBe(201);
     ownedIds.add((await response.json()).id);
   }
-    await page.setViewportSize({width: 1440, height: 1000});
-    await page.goto('/');
-    await page.getByRole('button', {name: 'Bookmarks', exact: true}).click();
-    await expect(page.locator('.bookmark-flag')).toHaveCount(3);
-     await expectAlignedFlags(page);
-     expect(await page.locator('.bookmark-table .bookmark-actions button').evaluateAll(buttons =>
-       buttons.every(button => getComputedStyle(button).whiteSpace === 'nowrap'
-         && button.scrollWidth <= button.clientWidth))).toBe(true);
-     await page.screenshot({path: 'test-results/bookmarks-desktop.png', fullPage: true});
-    await page.setViewportSize({width: 390, height: 844});
-    await expect(page.getByRole('complementary', {name: 'Spectrum bookmarks'})).toBeVisible();
-    await expectAlignedFlags(page);
-    await page.screenshot({path: 'test-results/bookmarks-mobile.png', fullPage: true});
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    const boxes = await page.locator('.bookmark-flag').evaluateAll(elements => elements.map(element => {
-      const {left, right, top, bottom} = element.getBoundingClientRect();
-      return {left, right, top, bottom};
-    }));
-    for (const [index, first] of boxes.entries()) {
-      for (const second of boxes.slice(index + 1)) {
-        expect(first.right <= second.left || second.right <= first.left || first.bottom <= second.top || second.bottom <= first.top).toBe(true);
-      }
+  await page.setViewportSize({width: 1440, height: 1000});
+  await page.goto('/');
+  await page.getByRole('button', {name: 'Bookmarks', exact: true}).click();
+  await expect(page.locator('.bookmark-flag')).toHaveCount(3);
+  const panel = page.getByRole('complementary', {name: 'Spectrum bookmarks'});
+  const list = panel.getByRole('list', {name: 'Saved signal bookmarks'});
+  await expect(list.getByRole('listitem')).toHaveCount(3);
+  await expectAlignedFlags(page);
+  const expectControlsInPanel = async () => {
+    await expect.poll(() => panel.evaluate(element => {
+      const left = element.getBoundingClientRect().left + element.clientLeft;
+      const right = left + element.clientWidth;
+      const buttons = [...element.querySelectorAll('li button')];
+      return element.scrollWidth === element.clientWidth && buttons.every(button => {
+        const bounds = button.getBoundingClientRect();
+        return bounds.left >= left && bounds.right <= right;
+      });
+    })).toBe(true);
+  };
+  await expectControlsInPanel();
+  await page.screenshot({path: 'test-results/bookmarks-desktop.png', fullPage: true});
+  await page.setViewportSize({width: 390, height: 844});
+  await expectAlignedFlags(page);
+  await expectControlsInPanel();
+  await page.screenshot({path: 'test-results/bookmarks-mobile.png', fullPage: true});
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const boxes = await page.locator('.bookmark-flag').evaluateAll(elements => elements.map(element => {
+    const {left, right, top, bottom} = element.getBoundingClientRect();
+    return {left, right, top, bottom};
+  }));
+  for (const [index, first] of boxes.entries()) {
+    for (const second of boxes.slice(index + 1)) {
+      expect(first.right <= second.left || second.right <= first.left || first.bottom <= second.top || second.bottom <= first.top).toBe(true);
     }
+  }
+  await page.setViewportSize({width: 320, height: 700});
+  await expectControlsInPanel();
+  expect(await panel.evaluate(element => element.scrollHeight === element.clientHeight)).toBe(true);
+  await list.getByRole('button', {name: 'Listen to ' + longTitle, exact: true}).click({trial: true});
+  await list.getByRole('button', {name: 'Delete ' + longTitle, exact: true}).click();
+  await expectControlsInPanel();
+  await list.getByRole('button', {name: 'Keep bookmark', exact: true}).click();
 });

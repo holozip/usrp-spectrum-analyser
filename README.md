@@ -67,8 +67,8 @@ with the markers. Add a title, modulation, tag and notes, then save. Manual
 entry remains available in the **Bookmarks** panel; Escape cancels selection
 and restores ordinary chart gestures.
 
-The panel lists bookmarks in a table with frequency, title, modulation,
-bandwidth and tag, plus explicit **Tune**, **Edit** and **Delete** actions.
+Each bookmark shows its title, frequency, bandwidth, modulation and tag,
+with **Tune**, **Listen** (when available), **Edit** and **Delete** actions.
 Tune uses the saved bandwidth to show the signal with surrounding context.
 It also opens Channel with the bookmarked frequency, a supported demodulator
 and a compatible filter width. When playback is off, Tune prepares the channel
